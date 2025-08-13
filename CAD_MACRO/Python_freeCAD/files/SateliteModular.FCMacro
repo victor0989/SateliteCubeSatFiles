@@ -1,0 +1,510 @@
+# Satélite completo con racks, brazos robóticos, alas solares articuladas y escudo térmico tipo Parker
+# Víctor + Copilot — FreeCAD 0.20+
+import FreeCAD as App, FreeCADGui as Gui
+import Part, math
+
+doc = App.newDocument("Satellite_Flagship")
+
+# -------------------------
+# Configuración paramétrica
+# -------------------------
+cfg = {
+    "bus": {
+        "L": 2.8, "W": 1.6, "H": 1.6,      # dimensiones exteriores (m)
+        "wall": 0.010,                     # grosor de paneles del bus
+        "frame_bar": 0.040,                # montantes interiores
+        "deck_thk": 0.008, "deck_count": 6,
+        "rails": True,
+        "panel_cutouts": True, "cut_w": 0.5, "cut_h": 0.25, "cut_gap": 0.08
+    },
+    "racks": {
+        "gap": 0.020,          # holgura desde carcasa a rack
+        "guide_w": 0.012, "guide_t": 0.010,
+        "rows": 2,             # nº de racks en Y
+        "slots": 8,            # slots en Z por rack
+        "slot_gap": 0.006,
+        "backplane_t": 0.012, "conn_r": 0.010, "dowel_r": 0.006
+    },
+    # Distribución de slots por rack (abajo->arriba)
+    "slots_layout": [
+        ["PROP","PROP","EPS","OBC","ADCS","RF","PAYLOAD","PAYLOAD"],  # Rack izquierdo
+        ["PROP","PROP","EPS","OBC","ADCS","RF","PAYLOAD","PAYLOAD"]   # Rack derecho
+    ],
+    "eps": { "bat_w": 0.35, "bat_d": 0.18, "bat_h": 0.16, "box_w": 0.42, "box_d": 0.28, "box_h": 0.10 },
+    "obc": { "pcbs": 6, "pcb_thk": 0.003, "pcb_gap": 0.010, "standoff_r": 0.004 },
+    "adcs": { "rw_r": 0.08, "rw_h": 0.05, "mag_r": 0.012, "mag_L": 0.50, "sun_sensors": 6 },
+    "rf": {
+        "patch_w": 0.30, "patch_h": 0.30, "patch_t": 0.008,
+        "trx_w": 0.35, "trx_d": 0.25, "trx_h": 0.10,
+        "monopole_r": 0.005, "monopole_L": 1.2, "coax_r": 0.006,
+        "hga_d": 0.9, "hga_depth": 0.20, "gimbal_r": 0.06
+    },
+    "prop": {
+        "tanks": 4, "tank_r": 0.11, "tank_L": 0.70,
+        "line_r": 0.010, "manifold_r": 0.040, "manifold_h": 0.12,
+        "check_valve_r": 0.016, "thrusters": 12, "thr_r1": 0.028, "thr_r2": 0.010, "thr_h": 0.070,
+        "service_panel": True, "qd": 4
+    },
+    "payload": {
+        "optic": True, "optic_d": 0.35, "optic_L": 0.30,
+        "bench_w": 0.70, "bench_d": 0.60, "bench_h": 0.06
+    },
+    "thermal": {
+        "radiators": [
+            {"w": 0.9, "h": 1.2, "t": 0.010, "face": "Y+"},
+            {"w": 0.9, "h": 1.2, "t": 0.010, "face": "Y-"}
+        ],
+        "heatpipes": [{"r": 0.008, "runs": 4}],
+        "show_MLI": True
+    },
+    "arms": {
+        "count": 2,
+        # cada brazo: base (x,y,z), yaw, shoulder, elbow, wrist, longitudes (m) y radios (m)
+        "bases": [
+            {"pos": (0.3, 0.4, 1.5), "yaw": 45,  "sh": 10, "el": 25, "wr": -15, "L": (0.8,0.7,0.4), "R": (0.05,0.045,0.035)},
+            {"pos": (0.3, 1.2, 1.5), "yaw": 135, "sh": 15, "el": 20, "wr":  10, "L": (0.8,0.7,0.4), "R": (0.05,0.045,0.035)}
+        ],
+        "gripper": {"jaw_L": 0.18, "jaw_w": 0.06, "jaw_t": 0.02},
+        "camera":  {"r": 0.05, "L": 0.10}
+    },
+    "solar": {
+        "wings": 4, "panel_thk": 0.006, "segment_L": [1.2, 1.0, 0.8], "segment_W": 0.9, "hinge_r": 0.030,
+        "sada_r": 0.10, "sada_h": 0.18
+    },
+    "parker_shield": {
+        "forward_axis": "+X",
+        "outer_r": 0.9, "inner_r": 0.25, "thk": 0.05,   # disco cónico truncado (aprox)
+        "cone_h": 0.25, "offset": 0.6,                  # distancia desde cara frontal del bus
+        "standoffs": 8, "standoff_L": 0.5, "standoff_r": 0.02,
+        "layers": 3, "layer_gap": 0.012                 # multilayer TPS
+    },
+    "modularity": {
+        "ring": True, "ring_w": 0.06, "ring_t": 0.02, "lugs": True, "lug_r": 0.028
+    },
+    "shielding": {
+        "whipple": True, "patch_t": 0.008, "patch_w": 0.40, "patch_h": 0.55
+    },
+    "harness": {
+        "trays": 3, "tray_w": 0.05, "tray_h": 0.03, "bundle_r": 0.015
+    }
+}
+
+# -------------------------
+# Utilidades
+# -------------------------
+def add(shape, name, color=(0.8,0.8,0.8), alpha=0.0, parent=None):
+    o = doc.addObject("Part::Feature", name)
+    o.Shape = shape
+    o.ViewObject.ShapeColor = color
+    o.ViewObject.Transparency = int(alpha*100)
+    if parent: parent.addObject(o)
+    return o
+
+def grp(name):
+    return doc.addObject("App::Part", name)
+
+def box(w,d,h, p=(0,0,0)):
+    return Part.makeBox(w,d,h, App.Vector(*p))
+
+def cyl(r,h, p=(0,0,0), d=(0,0,1)):
+    return Part.makeCylinder(r,h, App.Vector(*p), App.Vector(*d))
+
+def cone(r1,r2,h, p=(0,0,0), d=(0,0,1)):
+    return Part.makeCone(r1,r2,h, App.Vector(*p), App.Vector(*d))
+
+def sph(r, c=(0,0,0)):
+    return Part.makeSphere(r, App.Vector(*c))
+
+def tube_between(p1, p2, r):
+    v = App.Vector(*p2) - App.Vector(*p1)
+    h = v.Length
+    if h < 1e-6: return None
+    return cyl(r, h, p1, (v.x, v.y, v.z))
+
+def dir_from_angles(yaw_deg, pitch_deg):
+    # yaw en XY desde +X, pitch desde el plano XY hacia +Z
+    y = math.radians(yaw_deg); p = math.radians(pitch_deg)
+    return (math.cos(p)*math.cos(y), math.cos(p)*math.sin(y), math.sin(p))
+
+# -------------------------
+# Grupos por subsistema
+# -------------------------
+g_bus     = grp("Bus")
+g_racks   = grp("Racks")
+g_modules = grp("Modulos")
+g_eps     = grp("EPS")
+g_obc     = grp("OBC")
+g_adcs    = grp("ADCS")
+g_rf      = grp("RF")
+g_prop    = grp("Propulsion")
+g_pl      = grp("Payload")
+g_therm   = grp("Termico")
+g_arms    = grp("BrazosRoboticos")
+g_solar   = grp("AlasSolares")
+g_shield  = grp("EscudoParker")
+g_mod     = grp("Modularidad")
+g_shld    = grp("Blindaje")
+g_harn    = grp("Arnes")
+g_ext     = grp("Exterior")
+
+# -------------------------
+# 1) Bus estructural (carcasa, bastidor, decks y cutouts)
+# -------------------------
+B = cfg["bus"]; L,W,H = B["L"], B["W"], B["H"]; t = B["wall"]
+outer = box(L, W, H, (0,0,0))
+inner = box(L-2*t, W-2*t, H-2*t, (t,t,t))
+shell = outer.cut(inner)
+# cutouts en caras Y ±
+if B["panel_cutouts"]:
+    cw, ch, cg = B["cut_w"], B["cut_h"], B["cut_gap"]
+    for side in [0,1]:
+        y0 = -0.0002 if side==0 else W - t + 0.0002
+        for k in range(3):
+            z0 = t + cg + k*(ch+cg)
+            shell = shell.cut(box(cw, t+0.0004, ch, (L/2 - cw/2, y0, z0)))
+add(shell, "Carcasa", (0.75,0.75,0.78), 0.0, g_bus)
+
+# bastidor interior (montantes en 4 esquinas y a media cara)
+fb = cfg["bus"]["frame_bar"]
+for (x,y) in [(t,t),(L-t-fb,t),(t,W-t-fb),(L-t-fb,W-t-fb),(L/2-fb/2,t),(L/2-fb/2,W-t-fb)]:
+    add(box(fb, fb, H-2*t, (x,y,t)), f"Frame_{x:.2f}_{y:.2f}", (0.50,0.50,0.55), 0.0, g_bus)
+
+# decks
+for k in range(B["deck_count"]):
+    z = t + (H-2*t - B["deck_thk"]) * (k+1)/(B["deck_count"]+1)
+    add(box(L-2*t, W-2*t, B["deck_thk"], (t,t,z)), f"Deck_{k+1}", (0.70,0.70,0.75), 0.0, g_bus)
+
+# rails (opcional)
+if B["rails"]:
+    rw = 0.06; rh = 0.06
+    for (x,y) in [(0,0),(L-rw,0),(0,W-rh),(L-rw,W-rh)]:
+        add(box(rw, rh, H, (x,y,0)), f"Rail_{x:.2f}_{y:.2f}", (0.60,0.60,0.65), 0.0, g_bus)
+
+# -------------------------
+# 2) Racks internos (dos columnas), guías y backplane
+# -------------------------
+R = cfg["racks"]
+rack_total_gap = R["gap"]
+# dividir interior en dos racks (Y)
+rack_w = (L - 2*t)  # racks corren a lo largo de X
+rack_d = (W - 2*t - rack_total_gap) / R["rows"] - rack_total_gap
+rack_h = (H - 2*t)
+rack_x0 = t
+for r_i in range(R["rows"]):
+    y0 = t + rack_total_gap + r_i*(rack_d + rack_total_gap)
+    rack = box(rack_w, rack_d, rack_h, (rack_x0, y0, t))
+    add(rack, f"Rack_{r_i+1}", (0.60,0.60,0.65), 0.0, g_racks)
+    # guías en L
+    gw, gt = R["guide_w"], R["guide_t"]
+    for (x,y) in [(rack_x0, y0), (rack_x0 + rack_w-gw, y0), (rack_x0, y0 + rack_d-gw), (rack_x0 + rack_w-gw, y0 + rack_d-gw)]:
+        leg1 = box(gw, gt, rack_h, (x, y, t))
+        leg2 = box(gt, gw, rack_h, (x, y, t))
+        add(leg1.fuse(leg2), f"Rack{r_i+1}_Guide_{x:.2f}_{y:.2f}", (0.55,0.55,0.58), 0.0, g_racks)
+    # backplane en Y+
+    back = box(rack_w, R["backplane_t"], rack_h, (rack_x0, y0 + rack_d - R["backplane_t"], t))
+    add(back, f"Rack{r_i+1}_Backplane", (0.45,0.50,0.55), 0.0, g_racks)
+    # conectores por slot
+    slot_h = (rack_h - (R["slots"]+1)*R["slot_gap"]) / R["slots"]
+    for s in range(R["slots"]):
+        zc = t + R["slot_gap"]*(s+1) + slot_h*s + slot_h/2
+        add(cyl(R["conn_r"], 0.030, (L/2, y0 + rack_d, zc), (0,-1,0)), f"Rack{r_i+1}_Conn_{s+1}", (0.9,0.9,0.9), 0.0, g_racks)
+        add(cyl(R["dowel_r"], 0.020, (L/2 - 0.12, y0 + rack_d, zc), (0,-1,0)), f"Rack{r_i+1}_Dowel_{s+1}", (0.8,0.8,0.8), 0.0, g_racks)
+
+# helper bbox de slot
+def rack_slot_bbox(r_index, s_index):
+    y0 = t + R["gap"] + r_index*(rack_d + R["gap"])
+    slot_h = (rack_h - (R["slots"]+1)*R["slot_gap"]) / R["slots"]
+    z = t + R["slot_gap"]*(s_index+1) + slot_h*s_index
+    return (rack_x0, y0, z), (rack_w, rack_d, slot_h)
+
+# bandejas de slot
+for r_i in range(R["rows"]):
+    for s in range(R["slots"]):
+        (x0,y0,z0),(w,d,h) = rack_slot_bbox(r_i, s)
+        add(box(w, d, 0.006, (x0, y0, z0)), f"Rack{r_i+1}_SlotTray_{s+1}", (0.62,0.62,0.65), 0.0, g_racks)
+
+# -------------------------
+# 3) Módulos funcionales en slots
+# -------------------------
+def build_EPS(r_i, s_i):
+    (x0,y0,z0),(w,d,h) = rack_slot_bbox(r_i, s_i)
+    e = cfg["eps"]
+    eps = box(e["box_w"], e["box_d"], e["box_h"], (x0 + (w-e["box_w"])/2, y0 + (d-e["box_d"])/2, z0 + 0.006))
+    add(eps, f"EPS_Box_R{r_i+1}_S{s_i+1}", (0.25,0.30,0.35), 0.0, g_eps)
+    bat = box(e["bat_w"], e["bat_d"], e["bat_h"], (x0 + (w-e["bat_w"])/2, y0 + (d-e["bat_d"])/2, z0 + 0.006 + e["box_h"] + 0.010))
+    add(bat, f"EPS_Bat_R{r_i+1}_S{s_i+1}", (0.20,0.20,0.20), 0.0, g_eps)
+    add(cyl(0.010, 0.035, (L/2, y0 + d, z0 + h/2), (0,-1,0)), f"EPS_BackConn_R{r_i+1}_S{s_i+1}", (0.9,0.9,0.9), 0.0, g_eps)
+
+def build_OBC(r_i, s_i):
+    (x0,y0,z0),(w,d,h) = rack_slot_bbox(r_i, s_i)
+    o = cfg["obc"]; pcb_w = w-0.06; pcb_d = d-0.06; z = z0 + 0.010
+    for k in range(o["pcbs"]):
+        add(box(pcb_w, pcb_d, o["pcb_thk"], (x0+(w-pcb_w)/2, y0+(d-pcb_d)/2, z)), f"OBC_PCB_R{r_i+1}_S{s_i+1}_{k+1}", (0.05,0.45,0.25), 0.0, g_obc)
+        z += o["pcb_thk"] + o["pcb_gap"]
+    st_h = o["pcbs"]*(o["pcb_thk"]+o["pcb_gap"])
+    for (dx,dy) in [(x0+0.02,y0+0.02),(x0+w-0.02,y0+0.02),(x0+0.02,y0+d-0.02),(x0+w-0.02,y0+d-0.02)]:
+        add(cyl(o["standoff_r"], st_h, (dx, dy, z0+0.010), (0,0,1)), f"OBC_Standoff_R{r_i+1}_S{s_i+1}_{dx:.2f}", (0.7,0.7,0.7), 0.0, g_obc)
+
+def build_ADCS(r_i, s_i):
+    (x0,y0,z0),(w,d,h) = rack_slot_bbox(r_i, s_i)
+    a = cfg["adcs"]
+    add(cyl(a["rw_r"], a["rw_h"], (x0+w/2 - a["rw_r"], y0+d/2, z0+0.015), (1,0,0)), f"ADCS_RWX_R{r_i+1}_S{s_i+1}", (0.3,0.3,0.35), 0.0, g_adcs)
+    add(cyl(a["rw_r"], a["rw_h"], (x0+w/2, y0+d/2 - a["rw_r"], z0+0.015), (0,1,0)), f"ADCS_RWY_R{r_i+1}_S{s_i+1}", (0.3,0.3,0.35), 0.0, g_adcs)
+    add(cyl(a["rw_r"], a["rw_h"], (x0+w/2, y0+d/2, z0+0.015), (0,0,1)), f"ADCS_RWZ_R{r_i+1}_S{s_i+1}", (0.3,0.3,0.35), 0.0, g_adcs)
+    add(cyl(a["mag_r"], a["mag_L"], (x0+w/2, y0+0.02, z0+0.010), (0,0,1)), f"ADCS_MTQZ_R{r_i+1}_S{s_i+1}", (0.1,0.4,0.6), 0.0, g_adcs)
+
+def build_RF(r_i, s_i):
+    (x0,y0,z0),(w,d,h) = rack_slot_bbox(r_i, s_i)
+    r = cfg["rf"]
+    trx = box(r["trx_w"], r["trx_d"], r["trx_h"], (x0+(w-r["trx_w"])/2, y0+(d-r["trx_d"])/2, z0+0.012))
+    add(trx, f"RF_TRX_R{r_i+1}_S{s_i+1}", (0.35,0.35,0.40), 0.0, g_rf)
+    # coax interno hacia patch en Y-
+    add(tube_between((x0+w/2, y0, z0+r["trx_h"]+0.04), (L/2, -r["patch_t"], z0 + h/2), r["coax_r"]), f"RF_Coax_R{r_i+1}_S{s_i+1}", (0.2,0.2,0.2), 0.0, g_rf)
+    # patch externo (Y-)
+    add(box(r["patch_w"], r["patch_t"], r["patch_h"], (L/2 - r["patch_w"]/2, -r["patch_t"], z0 + h/2 - r["patch_h"]/2)), f"RF_Patch_R{r_i+1}_S{s_i+1}", (0.95,0.85,0.25), 0.0, g_rf)
+
+def build_PROP(r_i, s_i):
+    (x0,y0,z0),(w,d,h) = rack_slot_bbox(r_i, s_i)
+    p = cfg["prop"]; offs = 0.05
+    # tanques en cuatro cuadrantes
+    tpos = [
+        (x0+offs+p["tank_r"], y0+offs+p["tank_r"]),
+        (x0+w-offs-p["tank_r"], y0+offs+p["tank_r"]),
+        (x0+offs+p["tank_r"], y0+d-offs-p["tank_r"]),
+        (x0+w-offs-p["tank_r"], y0+d-offs-p["tank_r"])
+    ][:p["tanks"]]
+    zc = z0 + 0.012
+    tops = []
+    for n,(tx,ty) in enumerate(tpos):
+        add(cyl(p["tank_r"], p["tank_L"], (tx,ty,zc), (0,0,1)), f"PROP_Tank_R{r_i+1}_S{s_i+1}_{n+1}", (0.90,0.90,0.95), 0.0, g_prop)
+        # soportes
+        add(box(0.018, 0.045, 0.018, (tx-0.009, ty-0.0225, zc + p["tank_L"]/2 - 0.009)), f"PROP_TankBrkt_R{r_i+1}_S{s_i+1}_{n+1}", (0.6,0.6,0.6), 0.0, g_prop)
+        tops.append((tx,ty,zc+p["tank_L"]))
+    # manifold
+    man = cyl(p["manifold_r"], p["manifold_h"], (x0+w/2, y0+d/2, z0 + h - p["manifold_h"] - 0.02), (0,0,1))
+    add(man, f"PROP_Manifold_R{r_i+1}_S{s_i+1}", (0.6,0.6,0.65), 0.0, g_prop)
+    for k,tp in enumerate(tops):
+        ln = tube_between(tp, (x0+w/2, y0+d/2, z0 + h - 0.02), p["line_r"])
+        if ln: add(ln, f"PROP_Line_R{r_i+1}_S{s_i+1}_{k+1}", (0.85,0.75,0.25), 0.0, g_prop)
+        add(cyl(p["check_valve_r"], 0.05, ((tp[0]+x0+w/2)/2, (tp[1]+y0+d/2)/2, tp[2]+0.03), (0,0,1)), f"PROP_Check_R{r_i+1}_S{s_i+1}_{k+1}", (0.75,0.75,0.78), 0.0, g_prop)
+
+def build_PAYLOAD(r_i, s_i):
+    (x0,y0,z0),(w,d,h) = rack_slot_bbox(r_i, s_i)
+    P = cfg["payload"]
+    bench = box(P["bench_w"], P["bench_d"], P["bench_h"], (x0+(w-P["bench_w"])/2, y0+(d-P["bench_d"])/2, z0+0.010))
+    add(bench, f"PL_Bench_R{r_i+1}_S{s_i+1}", (0.6,0.8,0.9), 0.3, g_pl)
+
+builders = {"EPS":build_EPS, "OBC":build_OBC, "ADCS":build_ADCS, "RF":build_RF, "PROP":build_PROP, "PAYLOAD":build_PAYLOAD}
+
+for r_i in range(cfg["racks"]["rows"]):
+    layout = cfg["slots_layout"][r_i]
+    for s_i, typ in enumerate(layout):
+        if typ in builders:
+            builders[typ](r_i, s_i)
+
+# Óptica de payload (en +X frontal)
+if cfg["payload"]["optic"]:
+    add(cyl(cfg["payload"]["optic_d"]/2, cfg["payload"]["optic_L"], (L - t - cfg["payload"]["optic_L"], W/2, H/2 - cfg["payload"]["optic_d"]/4), (1,0,0)), "PL_Optic", (0.7,0.8,0.95), 0.0, g_pl)
+
+# -------------------------
+# 4) Brazos robóticos (2 DOF + codo + muñeca, pinza y cámara)
+# -------------------------
+A = cfg["arms"]
+def build_arm(base, name):
+    (bx,by,bz) = base["pos"]
+    yaw, sh, el, wr = base["yaw"], base["sh"], base["el"], base["wr"]
+    L1,L2,L3 = base["L"]; R1,R2,R3 = base["R"]
+    # pedestal y anillo de base
+    ped = cyl(R1*1.2, 0.12, (bx, by, bz-0.12), (0,0,1))
+    add(ped, f"{name}_Base", (0.55,0.55,0.58), 0.0, g_arms)
+    # segmento 1 (hombro)
+    d1 = dir_from_angles(yaw, sh)
+    p1_end = (bx + d1[0]*L1, by + d1[1]*L1, bz + d1[2]*L1)
+    add(cyl(R1, L1, (bx,by,bz), d1), f"{name}_S1", (0.8,0.8,0.85), 0.0, g_arms)
+    add(cyl(R1*1.1, 0.08, (bx,by,bz), d1), f"{name}_JointShoulder", (0.6,0.6,0.6), 0.0, g_arms)
+    # segmento 2 (codo)
+    d2 = dir_from_angles(yaw, sh+el)
+    p2_end = (p1_end[0] + d2[0]*L2, p1_end[1] + d2[1]*L2, p1_end[2] + d2[2]*L2)
+    add(cyl(R2, L2, p1_end, d2), f"{name}_S2", (0.8,0.8,0.85), 0.0, g_arms)
+    add(cyl(R2*1.1, 0.07, p1_end, d2), f"{name}_JointElbow", (0.6,0.6,0.6), 0.0, g_arms)
+    # segmento 3 (muñeca)
+    d3 = dir_from_angles(yaw, sh+el+wr)
+    p3_end = (p2_end[0] + d3[0]*L3, p2_end[1] + d3[1]*L3, p2_end[2] + d3[2]*L3)
+    add(cyl(R3, L3, p2_end, d3), f"{name}_S3", (0.8,0.8,0.85), 0.0, g_arms)
+    add(cyl(R3*1.2, 0.06, p2_end, d3), f"{name}_JointWrist", (0.6,0.6,0.6), 0.0, g_arms)
+    # pinza
+    G = A["gripper"]; jaw_L, jaw_w, jaw_t = G["jaw_L"], G["jaw_w"], G["jaw_t"]
+    # orientación simple: abrir pinza perpendicular a d3
+    # construir dos quijadas desplazadas lateralmente
+    # vector lateral aproximado
+    lat = (-d3[1], d3[0], 0.0)
+    lat_len = math.sqrt(lat[0]**2 + lat[1]**2 + lat[2]**2) or 1.0
+    lat = (lat[0]/lat_len, lat[1]/lat_len, lat[2]/lat_len)
+    jaw_off = jaw_w/2
+    j1_pos = (p3_end[0] + lat[0]*jaw_off, p3_end[1] + lat[1]*jaw_off, p3_end[2] + lat[2]*jaw_off)
+    j2_pos = (p3_end[0] - lat[0]*jaw_off, p3_end[1] - lat[1]*jaw_off, p3_end[2] - lat[2]*jaw_off)
+    add(box(jaw_t, jaw_w, jaw_L, (j1_pos[0], j1_pos[1]-jaw_w/2, j1_pos[2])), f"{name}_Jaw1", (0.85,0.75,0.55), 0.0, g_arms)
+    add(box(jaw_t, jaw_w, jaw_L, (j2_pos[0]-jaw_t, j2_pos[1]-jaw_w/2, j2_pos[2])), f"{name}_Jaw2", (0.85,0.75,0.55), 0.0, g_arms)
+    # cámara en muñeca
+    Cam = A["camera"]
+    add(cyl(Cam["r"], Cam["L"], p3_end, d3), f"{name}_WristCam", (0.4,0.45,0.6), 0.0, g_arms)
+    # cableado a lo largo del brazo (tubo paralelo)
+    r_cab = 0.02
+    add(tube_between((bx,by,bz), p1_end, r_cab), f"{name}_Harness1", (0.3,0.25,0.2), 0.0, g_arms)
+    add(tube_between(p1_end, p2_end, r_cab), f"{name}_Harness2", (0.3,0.25,0.2), 0.0, g_arms)
+    add(tube_between(p2_end, p3_end, r_cab), f"{name}_Harness3", (0.3,0.25,0.2), 0.0, g_arms)
+
+for idx, base in enumerate(A["bases"][:A["count"]]):
+    build_arm(base, f"Arm_{idx+1}")
+
+# -------------------------
+# 5) Alas solares segmentadas con SADA y bisagras
+# -------------------------
+S = cfg["solar"]
+def build_wing(side, idx):
+    # side: "Y-" o "Y+"
+    y = -S["panel_thk"] if side=="Y-" else W
+    # SADA (giro raíz)
+    sada = cyl(S["sada_r"], S["sada_h"], (0 if side=="Y-" else L-S["sada_r"]*2, y, H/2 - S["sada_h"]/2), (1,0,0))
+    add(sada, f"SADA_{side}_{idx}", (0.2,0.2,0.2), 0.0, g_solar)
+    # raíz del ala (pegada a SADA)
+    x0 = 0.0 if side=="Y-" else L - S["segment_L"][0]
+    segW = S["segment_W"]; thk = S["panel_thk"]
+    # tres segmentos con bisagras
+    seg0 = box(S["segment_L"][0], thk, segW, (x0, y if side=="Y-" else y, H/2 - segW/2))
+    add(seg0, f"Panel_{side}_{idx}_Root", (0.1,0.2,0.8), 0.0, g_solar)
+    add(cyl(S["hinge_r"], segW, (x0, y if side=="Y-" else y, H/2 - segW/2), (0,1,0)), f"Hinge_{side}_{idx}_0", (0.2,0.2,0.2), 0.0, g_solar)
+    # segmento medio
+    x1 = x0 + (S["segment_L"][0] if side=="Y-" else 0) - (0 if side=="Y-" else S["segment_L"][1])
+    seg1 = box(S["segment_L"][1], thk, segW, (x1, y if side=="Y-" else y, H/2 - segW/2))
+    add(seg1, f"Panel_{side}_{idx}_Mid", (0.1,0.2,0.8), 0.0, g_solar)
+    add(cyl(S["hinge_r"], segW, (x1, y if side=="Y-" else y, H/2 - segW/2), (0,1,0)), f"Hinge_{side}_{idx}_1", (0.2,0.2,0.2), 0.0, g_solar)
+    # tip
+    x2 = x1 + (S["segment_L"][1] if side=="Y-" else 0) - (0 if side=="Y-" else S["segment_L"][2])
+    seg2 = box(S["segment_L"][2], thk, segW, (x2, y if side=="Y-" else y, H/2 - segW/2))
+    add(seg2, f"Panel_{side}_{idx}_Tip", (0.1,0.2,0.8), 0.0, g_solar)
+    add(cyl(S["hinge_r"], segW, (x2, y if side=="Y-" else y, H/2 - segW/2), (0,1,0)), f"Hinge_{side}_{idx}_2", (0.2,0.2,0.2), 0.0, g_solar)
+
+# Construir 4 alas: dos por cada lado Y
+for i in range(S["wings"]//2):
+    build_wing("Y-", i+1)
+    build_wing("Y+", i+1)
+
+# -------------------------
+# 6) Escudo térmico estilo Parker (disco/cono multilayer + soportes)
+# -------------------------
+PS = cfg["parker_shield"]
+# Cara frontal del bus en +X
+x_face = L
+# capas TPS
+for k in range(PS["layers"]):
+    r_out = PS["outer_r"] - k*PS["layer_gap"]
+    r_in  = max(PS["inner_r"] - k*PS["layer_gap"]*0.5, 0.05)
+    # frustum: cono grande - cono pequeño => anillo cónico
+    frustum = cone(r_out, r_in, PS["cone_h"], (x_face + PS["offset"], W/2, H/2), (1,0,0))
+    # espesor (duplicado leve para enfatizar)
+    add(frustum, f"TPS_Layer_{k+1}", (0.90,0.90,0.95) if k==0 else (0.85,0.85,0.9), 0.0, g_shield)
+# standoffs radiales
+for i in range(PS["standoffs"]):
+    ang = 2*math.pi*i/PS["standoffs"]
+    yb = W/2 + (W/2 - 0.15)*math.cos(ang)
+    zb = H/2 + (H/2 - 0.15)*math.sin(ang)
+    base_pt = (x_face, yb, zb)
+    tip_pt  = (x_face + PS["offset"], W/2 + PS["outer_r"]*math.cos(ang), H/2 + PS["outer_r"]*math.sin(ang))
+    add(tube_between(base_pt, tip_pt, PS["standoff_r"]), f"TPS_Standoff_{i+1}", (0.6,0.6,0.65), 0.0, g_shield)
+
+# MLI tras escudo (película)
+if cfg["thermal"]["show_MLI"]:
+    mli = box(0.012, 1.05*W, 1.05*H, (x_face + PS["offset"] - 0.012, -0.025, -0.025))
+    add(mli, "TPS_MLI_Back", (1.0,1.0,0.6), 0.85, g_shield)
+
+    # Thruster propiamente dicho
+    add(cone(Pp["thr_r1"], Pp["thr_r2"], Pp["thr_h"], (x,y,z), dirv),
+        f"Thruster_{i+1}", (0.85,0.85,0.90), 0.0, g_prop)
+    # Línea de propelente desde manifold central (aprox centro del bus) al thruster
+    ln = tube_between((L/2, W/2, H/2), (x, y, z + Pp["thr_h"]*dirv[2]), Pp["line_r"])
+    if ln:
+        add(ln, f"FuelLine_Thr_{i+1}", (0.85,0.75,0.25), 0.0, g_prop)
+
+# Panel de servicio en cara Y+ con puertos QD
+if Pp["service_panel"]:
+    sp_w, sp_h, sp_t = 0.40, 0.60, 0.012
+    sp_x = L - sp_w - t*0.5
+    sp_y = W
+    sp_z = H/2 - sp_h/2
+    service_panel = box(sp_w, sp_t, sp_h, (sp_x, sp_y, sp_z))
+    add(service_panel, "ServicePanel", (0.55,0.55,0.6), 0.0, g_prop)
+    # Puertos QD distribuidos verticalmente
+    for k in range(Pp["qd"]):
+        qd_r, qd_L = 0.012, 0.020
+        qd_x = sp_x + sp_w/2
+        qd_y = sp_y + sp_t
+        qd_z = sp_z + (sp_h/(Pp["qd"]+1))*(k+1)
+        add(cyl(qd_r, qd_L, (qd_x, qd_y, qd_z), (1,0,0)),
+            f"QD_{k+1}", (0.9,0.9,0.9), 0.0, g_prop)
+    # Válvula de alivio (cono pequeño) en parte superior del panel
+    rv_r1, rv_r2, rv_h = 0.010, 0.002, 0.025
+    rv_x = sp_x + sp_w/2
+    rv_y = sp_y + sp_t
+    rv_z = sp_z + sp_h - rv_h
+    add(cone(rv_r1, rv_r2, rv_h, (rv_x, rv_y, rv_z), (1,0,0)),
+        "ReliefValve", (0.8,0.8,0.85), 0.0, g_prop)
+
+# -------------------------
+# 7) Propulsión externa: clusters de thrusters y panel de servicio con sensores
+# -------------------------
+Pp = cfg["prop"]
+base_ring_z = t + 0.10
+
+# Thrusters distribuidos alrededor del perímetro inferior
+for i in range(Pp["thrusters"]):
+    ang = 2*math.pi*i/Pp["thrusters"]
+    x = L*0.20 + (L-0.40)*((i%3)/2.0)  # distribución aproximada en X
+    y = W/2 + (W/2 - 0.10)*math.cos(ang)
+    z = base_ring_z + (H*0.05)*math.sin(ang*2)
+    dirv = (0.2, (y - W/2)*0.02, -0.6)
+
+    # Thruster
+    add(cone(Pp["thr_r1"], Pp["thr_r2"], Pp["thr_h"], (x,y,z), dirv),
+        f"Thruster_{i+1}", (0.85,0.85,0.90), 0.0, g_prop)
+
+    # Línea de propelente desde manifold central
+    ln = tube_between((L/2, W/2, H/2), (x, y, z + Pp["thr_h"]*dirv[2]), Pp["line_r"])
+    if ln:
+        add(ln, f"FuelLine_Thr_{i+1}", (0.85,0.75,0.25), 0.0, g_prop)
+
+# Panel de servicio en cara Y+ con QD y sensores
+if Pp["service_panel"]:
+    sp_w, sp_h, sp_t = 0.40, 0.60, 0.012
+    sp_x = L - sp_w - t*0.5
+    sp_y = W
+    sp_z = H/2 - sp_h/2
+    service_panel = box(sp_w, sp_t, sp_h, (sp_x, sp_y, sp_z))
+    add(service_panel, "ServicePanel", (0.55,0.55,0.6), 0.0, g_prop)
+
+    # Puertos QD con sensores asociados
+    for k in range(Pp["qd"]):
+        qd_r, qd_L = 0.012, 0.020
+        qd_x = sp_x + sp_w/2
+        qd_y = sp_y + sp_t
+        qd_z = sp_z + (sp_h/(Pp["qd"]+1))*(k+1)
+
+        # Puerto QD
+        add(cyl(qd_r, qd_L, (qd_x, qd_y, qd_z), (1,0,0)),
+            f"QD_{k+1}", (0.9,0.9,0.9), 0.0, g_prop)
+
+        # Sensor de presión (cilindro pequeño encima del QD)
+        add(cyl(0.006, 0.015, (qd_x + 0.025, qd_y, qd_z + 0.005), (1,0,0)),
+            f"PressureSensor_{k+1}", (0.8,0.2,0.2), 0.0, g_prop)
+
+        # Sensor de temperatura (cilindro pequeño debajo del QD)
+        add(cyl(0.005, 0.015, (qd_x - 0.025, qd_y, qd_z - 0.005), (1,0,0)),
+            f"TempSensor_{k+1}", (0.2,0.2,0.8), 0.0, g_prop)
+
+    # Válvula de alivio en parte superior del panel
+    rv_r1, rv_r2, rv_h = 0.010, 0.002, 0.025
+    rv_x = sp_x + sp_w/2
+    rv_y = sp_y + sp_t
+    rv_z = sp_z + sp_h - rv_h
+    add(cone(rv_r1, rv_r2, rv_h, (rv_x, rv_y, rv_z), (1,0,0)),
+        "ReliefValve", (0.8,0.8,0.85), 0.0, g_prop)

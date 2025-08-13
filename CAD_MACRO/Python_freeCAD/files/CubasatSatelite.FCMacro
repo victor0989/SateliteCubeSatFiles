@@ -1,0 +1,402 @@
+# CubeSat con racks y subsistemas funcionales — FreeCAD 0.20+
+# Víctor + Copilot — Modelo paramétrico, modular y realista (v2)
+import FreeCAD as App, FreeCADGui as Gui
+import Part, math
+
+doc = App.newDocument("CubeSat_Racks_Modular_v2")
+
+# -------------------------
+# Configuración general
+# -------------------------
+cfg = {
+    "u_size": 0.10,     # 1U en metros
+    "units": 6,         # altura total (U)
+    "tolerances": {"clearance": 0.0015},
+    # Estructura externa
+    "structure": {
+        "wall_thk": 0.002,
+        "rail_w": 0.008, "rail_h": 0.008,
+        "frame_bar": 0.008,
+        "deck_thk": 0.002, "deck_count": 10,
+        "sep_pads": True,
+        "cutouts_side": True, "cutout_w": 0.05, "cutout_h": 0.03, "cutout_gap": 0.01
+    },
+    # Rack y backplane
+    "rack": {
+        "gap": 0.004,
+        "guide_w": 0.004, "guide_t": 0.003,
+        "slots": 8, "slot_gap": 0.002,
+        "backplane_t": 0.004,
+        "connector_r": 0.004, "dowel_r": 0.002
+    },
+    # Orden de slots (de abajo a arriba)
+    "slots": ["PROP", "PROP", "EPS", "OBC", "ADCS", "RF", "PAYLOAD", "PAYLOAD"],
+    # Potencia (paneles)
+    "power": {"panels": 3, "panel_thk": 0.0012, "hinge_r": 0.004, "top_wing": True},
+    # EPS
+    "eps": {"bat_w": 0.070, "bat_d": 0.030, "bat_h": 0.045, "box_w": 0.090, "box_d": 0.060, "box_h": 0.020},
+    # OBC
+    "obc": {"pcbs": 4, "pcb_thk": 0.0016, "pcb_gap": 0.007, "standoff_r": 0.0018},
+    # ADCS
+    "adcs": {"rw_r": 0.020, "rw_h": 0.010, "mag_r": 0.004, "mag_L": 0.10, "sun_sensors": 4},
+    # RF
+    "rf": {"patch_w": 0.060, "patch_h": 0.060, "patch_t": 0.004, "trx_w": 0.080, "trx_d": 0.050, "trx_h": 0.020,
+           "monopole_r": 0.0015, "monopole_L": 0.40, "coax_r": 0.002},
+    # Propulsión
+    "prop": {"tanks": 4, "tank_r": 0.028, "tank_L": 0.18, "line_r": 0.003,
+             "manifold_r": 0.010, "manifold_h": 0.040, "check_valve_r": 0.004, "thrusters": 8,
+             "thr_r1": 0.007, "thr_r2": 0.002, "thr_h": 0.020, "service_panel": True, "qd": 3},
+    # Payload
+    "payload": {"optic": True, "optic_d": 0.050, "optic_L": 0.070,
+                "bench_w": 0.090, "bench_d": 0.090, "bench_h": 0.020},
+    # Térmico
+    "thermal": {"radiator_w": 0.10, "radiator_h": 0.30, "radiator_t": 0.003, "strap_w": 0.006, "strap_t": 0.001,
+                "show_MLI": True},
+    # Modularidad
+    "modularity": {"ring": True, "ring_w": 0.012, "ring_t": 0.004, "lugs": True, "lug_r": 0.006, "lug_count": 4},
+    # Blindaje
+    "shielding": {"whipple": True, "patch_t": 0.003, "patch_w": 0.060, "patch_h": 0.090},
+    # Arnés
+    "harness": {"trays": 3, "tray_w": 0.012, "tray_h": 0.008, "bundle_r": 0.004}
+}
+
+# Derivados
+U = cfg["u_size"]; L = U; W = U; H = U * cfg["units"]
+
+# -------------------------
+# Utilidades
+# -------------------------
+def add(shape, name, color=(0.8,0.8,0.8), alpha=0.0, parent=None):
+    o = doc.addObject("Part::Feature", name)
+    o.Shape = shape
+    o.ViewObject.ShapeColor = color
+    o.ViewObject.Transparency = int(alpha*100)
+    if parent: parent.addObject(o)
+    return o
+
+def grp(name): return doc.addObject("App::Part", name)
+def box(w,d,h, p=(0,0,0)): return Part.makeBox(w,d,h, App.Vector(*p))
+def cyl(r,h, p=(0,0,0), d=(0,0,1)): return Part.makeCylinder(r,h,App.Vector(*p),App.Vector(*d))
+def cone(r1,r2,h, p=(0,0,0), d=(0,0,1)): return Part.makeCone(r1,r2,h,App.Vector(*p),App.Vector(*d))
+def sph(r, c=(0,0,0)): return Part.makeSphere(r, App.Vector(*c))
+
+def tube_between(p1, p2, r):
+    v = App.Vector(*p2) - App.Vector(*p1)
+    h = v.Length
+    if h < 1e-6: return None
+    return cyl(r, h, p1, (v.x, v.y, v.z))
+
+# -------------------------
+# Grupos por subsistema
+# -------------------------
+g_struct = grp("Estructura")
+g_rack   = grp("Rack")
+g_mods   = grp("Modulos")
+g_power  = grp("Potencia")
+g_eps    = grp("EPS")
+g_obc    = grp("OBC")
+g_adcs   = grp("ADCS")
+g_rf     = grp("RF")
+g_prop   = grp("Propulsion")
+g_pl     = grp("Payload")
+g_therm  = grp("Termico")
+g_mod    = grp("Modularidad")
+g_shld   = grp("Blindaje")
+g_harn   = grp("Arnes")
+g_ext    = grp("Exterior")
+
+# -------------------------
+# 1) Estructura externa con cutouts, rails y bastidor
+# -------------------------
+st = cfg["structure"]
+outer = box(L, W, H, (0,0,0))
+inner = box(L-2*st["wall_thk"], W-2*st["wall_thk"], H-2*st["wall_thk"], (st["wall_thk"],)*3)
+shell = outer.cut(inner)
+
+# Cutouts laterales
+if st["cutouts_side"]:
+    cw, ch, cg = st["cutout_w"], st["cutout_h"], st["cutout_gap"]
+    for side in [0,1]:  # Y- y Y+
+        y0 = -0.0001 if side==0 else W - st["wall_thk"] + 0.0001
+        for k in range(3):
+            z0 = st["wall_thk"] + cg + k*(ch+cg)
+            cut = box(cw, st["wall_thk"]+0.0002, ch, (L/2 - cw/2, y0, z0))
+            shell = shell.cut(cut)
+add(shell, "Carcasa", (0.75,0.75,0.78), 0.0, g_struct)
+
+# Raíles
+for i,pos in enumerate([(0,0,0),(L-st["rail_w"],0,0),(0,W-st["rail_h"],0),(L-st["rail_w"],W-st["rail_h"],0)]):
+    add(box(st["rail_w"], st["rail_h"], H, pos), f"Rail_{i+1}", (0.60,0.60,0.65), 0.0, g_struct)
+
+# Bastidor vertical + decks
+fb, t = st["frame_bar"], st["wall_thk"]
+for i,(x,y) in enumerate([(t,t),(L-t-fb,t),(t,W-t-fb),(L-t-fb,W-t-fb)]):
+    add(box(fb,fb,H-2*t,(x,y,t)), f"FrameV_{i+1}", (0.50,0.50,0.55), 0.0, g_struct)
+for k in range(st["deck_count"]):
+    z = t + (H-2*t - st["deck_thk"]) * (k+1)/(st["deck_count"]+1)
+    add(box(L-2*t, W-2*t, st["deck_thk"], (t,t,z)), f"Deck_{k+1}", (0.70,0.70,0.75), 0.0, g_struct)
+
+# Pads de separación
+if st["sep_pads"]:
+    pad = box(st["rail_w"], st["rail_h"], 0.004, (0,0,H/2-0.002))
+    for i,pos in enumerate([(0,0),(L-st["rail_w"],0),(0,W-st["rail_h"]),(L-st["rail_w"],W-st["rail_h"])]):
+        add(pad.copy().translate(App.Vector(pos[0],pos[1],0)), f"SepPad_{i+1}", (0.55,0.55,0.6), 0.0, g_struct)
+
+# Tornillería en caras (cilindros pequeños a modo de pernos)
+bolt_r, bolt_h = 0.0018, 0.003
+for i,(x,y) in enumerate([(t*1.5,t*1.5),(L-t*1.5,t*1.5),(t*1.5,W-t*1.5),(L-t*1.5,W-t*1.5)]):
+    add(cyl(bolt_r, bolt_h, (x,y,-bolt_h), (0,0,1)), f"FaceBolt_Bot_{i+1}", (0.6,0.6,0.6), 0.0, g_struct)
+    add(cyl(bolt_r, bolt_h, (x,y,H), (0,0,1)), f"FaceBolt_Top_{i+1}", (0.6,0.6,0.6), 0.0, g_struct)
+
+# -------------------------
+# 2) Rack interno con guías y backplane
+# -------------------------
+rk = cfg["rack"]
+rack_w = L - 2*(t + rk["gap"])
+rack_d = W - 2*(t + rk["gap"])
+rack_h = H - 2*t
+rack = box(rack_w, rack_d, rack_h, (t+rk["gap"], t+rk["gap"], t))
+add(rack, "RackFrame", (0.6,0.6,0.65), 0.0, g_rack)
+
+# Guías en L (4 esquinas internas del rack)
+guide_w, guide_t = rk["guide_w"], rk["guide_t"]
+for i,(x,y) in enumerate([
+    (t+rk["gap"], t+rk["gap"]),
+    (t+rk["gap"]+rack_w-guide_w, t+rk["gap"]),
+    (t+rk["gap"], t+rk["gap"]+rack_d-guide_w),
+    (t+rk["gap"]+rack_w-guide_w, t+rk["gap"]+rack_d-guide_w)
+]):
+    leg1 = box(guide_w, guide_t, rack_h, (x, y, t))
+    leg2 = box(guide_t, guide_w, rack_h, (x, y, t))
+    add(leg1.fuse(leg2), f"GuideL_{i+1}", (0.55,0.55,0.58), 0.0, g_rack)
+
+# Backplane (cara Y+)
+back = box(rack_w, rk["backplane_t"], rack_h, (t+rk["gap"], t+rk["gap"]+rack_d-rk["backplane_t"], t))
+add(back, "Backplane", (0.45,0.50,0.55), 0.0, g_rack)
+
+# Conectores y pasadores por slot
+for i in range(rk["slots"]):
+    z = t + (rack_h) * (i+0.5)/rk["slots"]
+    add(cyl(rk["connector_r"], 0.010, (L/2, t+rk["gap"]+rack_d, z), (0,-1,0)), f"BP_Conn_{i+1}", (0.9,0.9,0.9), 0.0, g_rack)
+    add(cyl(rk["dowel_r"], 0.008, (L/2 - 0.02, t+rk["gap"]+rack_d, z), (0,-1,0)), f"BP_Dowel_{i+1}", (0.8,0.8,0.8), 0.0, g_rack)
+
+# -------------------------
+# 3) Slots y bandejas
+# -------------------------
+slot_h = (rack_h - (rk["slots"]+1)*rk["slot_gap"]) / rk["slots"]
+slot_zs = []
+for i in range(rk["slots"]):
+    z = t + rk["gap"] + rk["slot_gap"]*(i+1) + slot_h*i
+    slot_zs.append(z)
+    tray = box(rack_w, rack_d, 0.003, (t+rk["gap"], t+rk["gap"], z))
+    add(tray, f"SlotTray_{i+1}", (0.62,0.62,0.65), 0.0, g_mods)
+
+def slot_bbox(i):
+    return (t+rk["gap"], t+rk["gap"], slot_zs[i]), (rack_w, rack_d, slot_h)
+
+# -------------------------
+# 4) Builders de módulos por tipo
+# -------------------------
+def build_EPS(i):
+    (x0,y0,z0),(w,d,h) = slot_bbox(i)
+    p = cfg["eps"]
+    eps = box(p["box_w"], p["box_d"], p["box_h"], (x0 + (w-p["box_w"])/2, y0 + (d-p["box_d"])/2, z0 + 0.003))
+    add(eps, f"EPS_Box_S{i+1}", (0.25,0.30,0.35), 0.0, g_eps)
+    bat = box(p["bat_w"], p["bat_d"], p["bat_h"], (x0 + (w-p["bat_w"])/2, y0 + (d-p["bat_d"])/2, z0 + 0.003 + p["box_h"] + 0.004))
+    add(bat, f"EPS_Bat_S{i+1}", (0.20,0.20,0.20), 0.0, g_eps)
+    # Conector al backplane
+    add(cyl(0.004, 0.010, (L/2, y0 + d, z0 + h/2), (0,-1,0)), f"EPS_BackConn_S{i+1}", (0.9,0.9,0.9), 0.0, g_eps)
+    # Soportes batería (2 perfiles)
+    add(box(0.004, p["bat_d"]+0.004, 0.004, (x0 + (w-p["bat_w"])/2 - 0.004, y0 + (d-p["bat_d"])/2 - 0.002, z0 + 0.003 + p["box_h"] + 0.002)), f"EPS_BatBrkt1_S{i+1}", (0.6,0.6,0.6), 0.0, g_eps)
+    add(box(0.004, p["bat_d"]+0.004, 0.004, (x0 + (w+p["bat_w"])/2, y0 + (d-p["bat_d"])/2 - 0.002, z0 + 0.003 + p["box_h"] + 0.002)), f"EPS_BatBrkt2_S{i+1}", (0.6,0.6,0.6), 0.0, g_eps)
+
+def build_OBC(i):
+    (x0,y0,z0),(w,d,h) = slot_bbox(i)
+    ob = cfg["obc"]
+    pcb_w = w-0.008; pcb_d = d-0.008
+    z = z0 + 0.004
+    for k in range(ob["pcbs"]):
+        add(box(pcb_w, pcb_d, ob["pcb_thk"], (x0+(w-pcb_w)/2, y0+(d-pcb_d)/2, z)), f"OBC_PCB_{i+1}_{k+1}", (0.05,0.45,0.25), 0.0, g_obc)
+        z += ob["pcb_thk"] + ob["pcb_gap"]
+    st_h = ob["pcbs"]*(ob["pcb_thk"]+ob["pcb_gap"])
+    for n,(dx,dy) in enumerate([(x0+0.010,y0+0.010),(x0+w-0.010,y0+0.010),(x0+0.010,y0+d-0.010),(x0+w-0.010,y0+d-0.010)]):
+        add(cyl(ob["standoff_r"], st_h, (dx, dy, z0+0.004), (0,0,1)), f"OBC_Standoff_{i+1}_{n+1}", (0.7,0.7,0.7), 0.0, g_obc)
+
+def build_ADCS(i):
+    (x0,y0,z0),(w,d,h) = slot_bbox(i)
+    ad = cfg["adcs"]
+    add(cyl(ad["rw_r"], ad["rw_h"], (x0+w/2 - ad["rw_r"], y0+d/2, z0+0.010), (1,0,0)), f"ADCS_RW_X_{i+1}", (0.3,0.3,0.35), 0.0, g_adcs)
+    add(cyl(ad["rw_r"], ad["rw_h"], (x0+w/2, y0+d/2 - ad["rw_r"], z0+0.010), (0,1,0)), f"ADCS_RW_Y_{i+1}", (0.3,0.3,0.35), 0.0, g_adcs)
+    add(cyl(ad["rw_r"], ad["rw_h"], (x0+w/2, y0+d/2, z0+0.010), (0,0,1)), f"ADCS_RW_Z_{i+1}", (0.3,0.3,0.35), 0.0, g_adcs)
+    add(cyl(ad["mag_r"], ad["mag_L"], (x0+w/2, y0+0.008, z0+0.005), (0,0,1)), f"ADCS_MTQ_Z_{i+1}", (0.1,0.4,0.6), 0.0, g_adcs)
+
+def build_RF(i):
+    (x0,y0,z0),(w,d,h) = slot_bbox(i)
+    rf = cfg["rf"]
+    trx = box(rf["trx_w"], rf["trx_d"], rf["trx_h"], (x0+(w-rf["trx_w"])/2, y0+(d-rf["trx_d"])/2, z0+0.004))
+    add(trx, f"RF_TRX_{i+1}", (0.35,0.35,0.40), 0.0, g_rf)
+    patch = box(rf["patch_w"], rf["patch_t"], rf["patch_h"], (L/2 - rf["patch_w"]/2, -rf["patch_t"], z0+h/2 - rf["patch_h"]/2))
+    add(patch, f"RF_Patch_{i+1}", (0.95,0.85,0.25), 0.0, g_rf)
+    # Coax TRX->Patch
+    add(tube_between((x0+w/2, y0+d/2, z0+rf["trx_h"]+0.010), (L/2, -rf["patch_t"], z0+h/2), rf["coax_r"]), f"RF_Coax_{i+1}", (0.2,0.2,0.2), 0.0, g_rf)
+
+def build_PROP(i):
+    (x0,y0,z0),(w,d,h) = slot_bbox(i)
+    pr = cfg["prop"]
+    offs = 0.012
+    tank_positions = [
+        (x0+offs+pr["tank_r"], y0+offs+pr["tank_r"]),
+        (x0+w-offs-pr["tank_r"], y0+offs+pr["tank_r"]),
+        (x0+offs+pr["tank_r"], y0+d-offs-pr["tank_r"]),
+        (x0+w-offs-pr["tank_r"], y0+d-offs-pr["tank_r"])
+    ][:pr["tanks"]]
+    zc = z0 + 0.004
+    tops = []
+    for n,(tx,ty) in enumerate(tank_positions):
+        add(cyl(pr["tank_r"], pr["tank_L"], (tx,ty,zc), (0,0,1)), f"PROP_Tank_{i+1}_{n+1}", (0.90,0.90,0.95), 0.0, g_prop)
+        # Soportes de tanque (anillos-bloque)
+        add(box(0.006, 0.014, 0.006, (tx-0.003, ty-0.007, zc + pr["tank_L"]/2 - 0.003)), f"PROP_TankBrkt_{i+1}_{n+1}", (0.6,0.6,0.6), 0.0, g_prop)
+        tops.append((tx,ty,zc+pr["tank_L"]))
+    # Botella presurizante (esfera)
+    add(sph(0.018, (x0+w/2, y0+d/2, z0+0.020)), f"PROP_PressBottle_{i+1}", (0.88,0.88,0.92), 0.0, g_prop)
+    # Manifold central
+    man = cyl(pr["manifold_r"], pr["manifold_h"], (x0+w/2, y0+d/2, z0 + h - pr["manifold_h"] - 0.004), (0,0,1))
+    add(man, f"PROP_Manifold_{i+1}", (0.6,0.6,0.65), 0.0, g_prop)
+    # Tuberías tanque->manifold + válvulas de retención
+    for k,tp in enumerate(tops):
+        ln = tube_between(tp, (x0+w/2, y0+d/2, z0 + h - 0.010), pr["line_r"])
+        if ln: add(ln, f"PROP_Line_{i+1}_{k+1}", (0.85,0.75,0.25), 0.0, g_prop)
+        add(cyl(pr["check_valve_r"], 0.012, ((tp[0]+x0+w/2)/2, (tp[1]+y0+d/2)/2, tp[2]+0.020), (0,0,1)), f"PROP_CheckValve_{i+1}_{k+1}", (0.75,0.75,0.78), 0.0, g_prop)
+
+def build_PAYLOAD(i):
+    (x0,y0,z0),(w,d,h) = slot_bbox(i)
+    pl = cfg["payload"]
+    bench = box(pl["bench_w"], pl["bench_d"], pl["bench_h"], (x0+(w-pl["bench_w"])/2, y0+(d-pl["bench_d"])/2, z0+0.004))
+    add(bench, f"PL_Bench_{i+1}", (0.6,0.8,0.9), 0.3, g_pl)
+
+# Construcción de módulos según lista
+builders = {"EPS":build_EPS,"OBC":build_OBC,"ADCS":build_ADCS,"RF":build_RF,"PROP":build_PROP,"PAYLOAD":build_PAYLOAD}
+for i,typ in enumerate(cfg["slots"]):
+    if typ in builders: builders[typ](i)
+
+# Óptica del payload (en cara +Z si está habilitada)
+pl = cfg["payload"]
+if pl["optic"]:
+    add(cyl(pl["optic_d"]/2, pl["optic_L"], (L/2, W/2, H - t - pl["optic_L"]), (0,0,1)), "PL_Optic", (0.7,0.8,0.95), 0.0, g_pl)
+
+# -------------------------
+# 5) Propulsión externa: thrusters y placa de servicio
+# -------------------------
+pr = cfg["prop"]
+base_pts = [(t*2, t*2, t),(L-t*2, t*2, t),(t*2, W-t*2, t),(L-t*2, W-t*2, t),
+            (L/2, t*2, t),(L/2, W-t*2, t),(t*2, W/2, t),(L-t*2, W/2, t)]
+for i,pt in enumerate(base_pts[:pr["thrusters"]]):
+    v = App.Vector(pt[0]-L/2, pt[1]-W/2, - (L+W)/6.0).normalize()
+    add(cone(pr["thr_r1"], pr["thr_r2"], pr["thr_h"], pt, (v.x,v.y,v.z)), f"Thruster_{i+1}", (0.85,0.85,0.90), 0.0, g_prop)
+    ln = tube_between((L/2,W/2,H/2), (pt[0], pt[1], pt[2]+pr["thr_h"]*v.z), pr["line_r"])
+    if ln: add(ln, f"FuelLine_Thr_{i+1}", (0.85,0.75,0.25), 0.0, g_prop)
+
+# Placa de servicio y QD (lateral Y+)
+if pr["service_panel"]:
+    sp = box(0.10, 0.004, 0.20, (L-0.10-t*0.5, W, H/2-0.10))
+    add(sp, "ServicePanel", (0.55,0.55,0.6), 0.0, g_prop)
+    for k in range(pr["qd"]):
+        zq = H/2 - 0.08 + k*0.08
+        add(cyl(0.006, 0.006, (L-0.05, W+0.004, zq), (1,0,0)), f"QD_{k+1}", (0.9,0.9,0.9), 0.0, g_prop)
+    # Válvula de alivio (cono pequeño)
+    add(cone(0.004, 0.0005, 0.010, (L-0.08, W+0.004, H/2+0.10), (1,0,0)), "ReliefValve", (0.8,0.8,0.85), 0.0, g_prop)
+
+# -------------------------
+# 6) Potencia: paneles y bisagras
+# -------------------------
+pw = cfg["power"]
+# Paneles laterales N/S
+for side in [-1,1][:min(pw["panels"],2)]:
+    y = -pw["panel_thk"] if side<0 else W
+    add(box(L, pw["panel_thk"], H, (0,y,0)), f"SolarPanel_{'N' if side<0 else 'S'}", (0.1,0.2,0.8), 0.0, g_power)
+    hx = 0 if side<0 else L; hy = 0 if side<0 else W
+    add(cyl(pw["hinge_r"], H, (hx, hy, 0), (0,0,1)), f"Hinge_{'N' if side<0 else 'S'}", (0.2,0.2,0.2), 0.0, g_power)
+# Ala superior
+if pw["top_wing"]:
+    add(box(L, pw["panel_thk"], L, (0, W, H - L)), "SolarWing_Top", (0.1,0.2,0.8), 0.0, g_power)
+    add(cyl(pw["hinge_r"], L, (0, W, H - L), (1,0,0)), "Hinge_Top", (0.2,0.2,0.2), 0.0, g_power)
+
+# -------------------------
+# 7) Comunicaciones y sensores externos
+# -------------------------
+rf = cfg["rf"]
+add(box(rf["patch_w"], rf["patch_t"], rf["patch_h"], (L/2 - rf["patch_w"]/2, -rf["patch_t"], H/2 - rf["patch_h"]/2)), "RF_Patch_Main", (0.95,0.85,0.25), 0.0, g_rf)
+add(cyl(rf["monopole_r"], rf["monopole_L"], (t*2, t*2, H), (0,0,1)), "RF_Monopole", (0.9,0.9,0.9), 0.0, g_rf)
+# Star tracker superior (caja + abertura)
+st_box = box(0.06, 0.05, 0.04, (L/2-0.03, W/2-0.025, H - t - 0.04))
+st_ap  = cyl(0.015, 0.03, (L/2, W/2, H - t - 0.01), (0,0,1))
+add(st_box.fuse(st_ap), "StarTracker", (0.4,0.45,0.6), 0.0, g_ext)
+# Sensores solares (4, dos caras)
+ss = box(0.012,0.002,0.012,(L/2-0.006,-0.002,H/2-0.006))
+add(ss, "SunSensor_Y-", (0.95,0.85,0.25), 0.0, g_ext)
+add(ss.copy().translate(App.Vector(0,W+0.002,0)), "SunSensor_Y+", (0.95,0.85,0.25), 0.0, g_ext)
+
+# -------------------------
+# 8) Gestión térmica
+# -------------------------
+th = cfg["thermal"]
+add(box(th["radiator_w"], th["radiator_t"], th["radiator_h"], (L/2 - th["radiator_w"]/2, W, H/2 - th["radiator_h"]/2)), "Radiator", (0.85,0.85,0.9), 0.0, g_therm)
+# Thermal straps desde batería (EPS) hacia el radiador
+add(box(th["strap_w"], th["strap_t"], 0.20, (t*2 + cfg["eps"]["bat_w"]/2, W - t - th["strap_t"], 0.15)), "ThermalStrap_1", (0.85,0.75,0.55), 0.0, g_therm)
+add(box(th["strap_w"], th["strap_t"], 0.20, (t*2 + cfg["eps"]["bat_w"]/2 + 0.015, W - t - th["strap_t"], 0.15)), "ThermalStrap_2", (0.85,0.75,0.55), 0.0, g_therm)
+# MLI visual
+if th["show_MLI"]:
+    mli_outer = box(L+0.0004, W+0.0004, H+0.0004, (-0.0002,-0.0002,-0.0002))
+    mli_inner = box(L-2*(t-0.0002), W-2*(t-0.0002), H-2*(t-0.0002), (t-0.0002,)*3)
+    add(mli_outer.cut(mli_inner), "MLI_Skin", (1.0,1.0,0.6), 0.85, g_therm)
+
+# -------------------------
+# 9) Modularidad y blindaje
+# -------------------------
+md = cfg["modularity"]
+if md["ring"]:
+    ringR = min(L,W)/2 - t*1.5
+    ring = cyl(ringR, md["ring_t"], (L/2 - ringR, W/2, H - t - md["ring_t"]), (1,0,0)).cut(
+           cyl(ringR - md["ring_w"], md["ring_t"]+0.0001, (L/2 - (ringR - md["ring_w"]), W/2, H - t - md["ring_t"]-0.00005), (1,0,0)))
+    add(ring, "DockingRing", (0.65,0.65,0.65), 0.0, g_mod)
+if md["lugs"]:
+    for i,(x,y) in enumerate([(t*2,t*2),(L-t*2,t*2),(t*2,W-t*2),(L-t*2,W-t*2)]):
+        add(cyl(md["lug_r"], 0.015, (x, y, H - t - 0.015), (0,0,1)), f"GrappleLug_{i+1}", (0.6,0.6,0.65), 0.0, g_mod)
+
+sh = cfg["shielding"]
+if sh["whipple"]:
+    add(box(sh["patch_w"], sh["patch_h"], sh["patch_t"], (L/2 - sh["patch_w"]/2, W/2 - sh["patch_h"]/2, -sh["patch_t"])), "Whipple_Bottom", (0.8,0.8,0.85), 0.0, g_shld)
+    add(box(sh["patch_w"], sh["patch_t"], sh["patch_h"], (L/2 - sh["patch_w"]/2, W + sh["patch_t"], H/2 - sh["patch_h"]/2)), "Whipple_Service", (0.8,0.8,0.85), 0.0, g_shld)
+
+# -------------------------
+# 10) Arnés: bandejas y tramos principales
+# -------------------------
+ha = cfg["harness"]
+for i in range(ha["trays"]):
+    z = t + (H-2*t) * (i+1)/(ha["trays"]+1)
+    add(box(ha["tray_w"], ha["tray_h"], L-2*t, (L - t - ha["tray_w"], t, z - (L-2*t)/2)), f"HarnessTray_{i+1}", (0.6,0.55,0.45), 0.0, g_harn)
+
+# Tramos de cables (bundles) entre EPS->OBC y OBC->RF
+bundle_r = ha["bundle_r"]
+# Estimar centros de módulos por slot (si existen)
+def slot_center(i):
+    (x0,y0,z0),(w,d,h) = slot_bbox(i)
+    return (x0 + w/2, y0 + d/2, z0 + h/2)
+
+idx_map = {name: idx for idx, name in enumerate(cfg["slots"])}
+if "EPS" in idx_map and "OBC" in idx_map:
+    p1 = slot_center(idx_map["EPS"]); p2 = slot_center(idx_map["OBC"])
+    add(tube_between(p1, p2, bundle_r), "Harness_EPS_OBC", (0.3,0.25,0.2), 0.0, g_harn)
+if "OBC" in idx_map and "RF" in idx_map:
+    p1 = slot_center(idx_map["OBC"]); p2 = slot_center(idx_map["RF"])
+    add(tube_between(p1, p2, bundle_r), "Harness_OBC_RF", (0.3,0.25,0.2), 0.0, g_harn)
+
+# -------------------------
+# Vista final
+# -------------------------
+doc.recompute()
+Gui.activeView().viewAxonometric()
+Gui.SendMsgToActiveView("ViewFit")
+
+print("CubeSat con racks, payloads y subsistemas generado (v2).")
+print(f"Dimensiones exteriores: {L:.3f} x {W:.3f} x {H:.3f} m")
