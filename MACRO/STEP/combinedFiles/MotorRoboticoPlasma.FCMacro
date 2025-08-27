@@ -1,0 +1,320 @@
+# -*- coding: utf-8 -*-
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part, Mesh
+import math, os
+
+doc = App.newDocument("CubeSat_Robotico_Internal_1U")
+
+# =========================
+# Parámetros globales
+# =========================
+EXT = (100.0, 100.0, 113.5)
+PANEL_T = 2.0
+USEFUL = (96.0, 96.0, 109.5)
+cx, cy, z0 = USEFUL[0]/2.0, USEFUL[1]/2.0, 0.0
+
+THROAT_D = 62.0
+GRID_OD, GRID_ID = 55.0, 40.0
+GRID_TH, GRID_GAP, GRID_CNT = 0.5, 1.0, 3
+CAV_D, CAV_L = 45.0, 35.0
+STACK_HT = 8.0
+BASEPLATE = (80.0, 80.0, 3.0)
+GIMBAL_BASE_D, GIMBAL_H, GIMBAL_RANGE = 34.0, 25.0, 15.0
+
+TANK_XE = dict(d=50.0, h=70.0, wall=1.8)
+TANK_I2 = dict(w=80.0, l=60.0, h=25.0, band_w=3.0, band_t=0.8)
+PPU_MODULE = (40.0, 30.0, 12.0)
+HV_CABLE_MAX = 60.0
+
+propellant = 'I2'    # 'I2' | 'Xe'
+thruster_spare = False
+include_gimbal = True
+include_arm = True
+include_mli = True
+export_step = True
+export_stl  = False
+
+# =========================
+# Utilidades y materiales
+# =========================
+rho_map = [
+    (("Baseplate","Rack","Radiator","Bracket"), 2700.0),
+    (("Grid","Frame","Head","Discharge","Gimbal","Shroud","Clamp"), 7800.0),
+    (("Ceramic","Pivot"), 3200.0),
+    (("TankXe","Valve","Reg"), 8000.0),
+    (("TankI2","Heater"), 2700.0),
+    (("PPU","PCB","IMU","Cam","LiDAR","Star","Backplane"), 2500.0),
+    (("RW","MTQ"), 7800.0),
+    (("MLI",), 150.0),
+]
+def rho_for(label):
+    for keys, rho in rho_map:
+        if any(label.startswith(k) for k in (keys if isinstance(keys, tuple) else (keys,))):
+            return rho
+    return 2700.0
+
+def add_obj(shape, label, color=None):
+    o = doc.addObject("Part::Feature", label)
+    o.Shape = shape
+    if color:
+        try: Gui.ActiveDocument.getObject(o.Name).ShapeColor = color
+        except: pass
+    return o
+
+def make_annulus(od, idd, h, base_vec, axis=App.Vector(0,0,1)):
+    outer = Part.makeCylinder(max(0.1, od/2.0), h, base_vec, axis)
+    inner = Part.makeCylinder(max(0.0, idd/2.0), h+0.2, App.Vector(base_vec.x, base_vec.y, base_vec.z-0.1), axis)
+    return outer.cut(inner)
+
+def hole_pattern(cx, cy, z, count, bc_d):
+    r = bc_d/2.0
+    return [App.Vector(cx + r*math.cos(2*math.pi*i/count),
+                       cy + r*math.sin(2*math.pi*i/count), z) for i in range(count)]
+
+# =========================
+# 1) Cavidad interna (útil)
+# =========================
+inner_box = Part.makeBox(USEFUL[0], USEFUL[1], USEFUL[2], App.Vector(PANEL_T, PANEL_T, PANEL_T))
+inner_o = add_obj(inner_box, "ChassisInner", (0.93,0.93,0.96))
+
+# =========================
+# 2) Baseplate con rebaje, O-ring y patrón M2
+# =========================
+bx0, by0 = PANEL_T + cx - BASEPLATE[0]/2.0, PANEL_T + cy - BASEPLATE[1]/2.0
+base = Part.makeBox(*BASEPLATE, App.Vector(bx0, by0, PANEL_T))
+# rebaje centrado
+recess = Part.makeCylinder(56.0/2.0, 1.0, App.Vector(PANEL_T+cx, PANEL_T+cy, PANEL_T + BASEPLATE[2] - 1.0))
+base = base.cut(recess)
+# ranura tórica Ø58×1.5 mm
+Rmid, sec, depth = 58.0/2.0, 1.5, 1.2
+og_out = Part.makeCylinder(Rmid+sec, depth, App.Vector(PANEL_T+cx, PANEL_T+cy, PANEL_T + BASEPLATE[2] - depth))
+og_in  = Part.makeCylinder(Rmid-sec, depth+0.2, App.Vector(PANEL_T+cx, PANEL_T+cy, PANEL_T + BASEPLATE[2] - (depth+0.2)))
+base = base.cut(og_out.cut(og_in))
+# patrón 6×M2 Ø2.1
+for p in hole_pattern(PANEL_T+cx, PANEL_T+cy, PANEL_T-0.5, 6, 48.0):
+    base = base.cut(Part.makeCylinder(2.1/2.0, BASEPLATE[2]+1.5, p))
+base_o = add_obj(base, "Baseplate", (0.35,0.55,0.85))
+
+# =========================
+# 3) Thruster stack + cámara + neutralizador
+# =========================
+def build_thruster(prefix, xc, yc, z_out):
+    objs=[]
+    # stack (salida en z_out)
+    z_stack = z_out - STACK_HT
+    frame = make_annulus(GRID_OD, GRID_ID, 1.6, App.Vector(PANEL_T+xc, PANEL_T+yc, z_stack))
+    objs.append(add_obj(frame, prefix+"Frame", (0.80,0.45,0.35)))
+    z = z_stack + 1.6
+    ins = make_annulus(GRID_OD, GRID_ID+2.0, 1.5, App.Vector(PANEL_T+xc, PANEL_T+yc, z))
+    objs.append(add_obj(ins, prefix+"Ceramic", (0.94,0.92,0.86)))
+    z += 1.5
+    for i in range(GRID_CNT):
+        disc = Part.makeCylinder(GRID_ID/2.0, GRID_TH, App.Vector(PANEL_T+xc, PANEL_T+yc, z))
+        objs.append(add_obj(disc, f"{prefix}Grid_{i+1}", (0.55,0.55,0.58)))
+        z += GRID_TH
+        if i < GRID_CNT-1:
+            sp = make_annulus(GRID_OD-1.0, GRID_ID+1.0, GRID_GAP, App.Vector(PANEL_T+xc, PANEL_T+yc, z))
+            objs.append(add_obj(sp, f"{prefix}Spacer_{i+1}", (0.90,0.90,0.95)))
+            z += GRID_GAP
+    # cámara
+    z_cam = PANEL_T + 3.0
+    cav_o = Part.makeCylinder(CAV_D/2.0, CAV_L, App.Vector(PANEL_T+xc, PANEL_T+yc, z_cam))
+    cav_i = Part.makeCylinder(CAV_D/2.0 - 1.2, CAV_L-0.6, App.Vector(PANEL_T+xc, PANEL_T+yc, z_cam+0.3))
+    objs.append(add_obj(cav_o.cut(cav_i), prefix+"Discharge", (0.70,0.70,0.78)))
+    # cabezal
+    head = Part.makeCylinder(36.0/2.0, 30.0, App.Vector(PANEL_T+xc, PANEL_T+yc, z_cam + CAV_L))
+    objs.append(add_obj(head, prefix+"Head", (0.62,0.62,0.64)))
+    # neutralizador
+    n_x = PANEL_T+xc + 12.0
+    neut = Part.makeCylinder(1.0/2.0, 6.0, App.Vector(n_x, PANEL_T+yc, z_out - 6.0))
+    br = Part.makeBox(20.0, 12.0, 1.5, App.Vector(n_x-10.0, PANEL_T+yc-6.0, z_cam + 6.0))
+    objs.append(add_obj(neut, prefix+"Neutralizer", (0.85,0.65,0.45)))
+    objs.append(add_obj(br, prefix+"NeutralBracket", (0.60,0.60,0.62)))
+    return objs
+
+# =========================
+# 4) Gimbal 2DOF (geométrica)
+# =========================
+def build_gimbal(prefix, xc, yc):
+    objs=[]
+    z_base = PANEL_T + BASEPLATE[2]
+    base_disc = Part.makeCylinder(GIMBAL_BASE_D/2.0, 3.0, App.Vector(PANEL_T+xc, PANEL_T+yc, z_base))
+    yaw = make_annulus(GIMBAL_BASE_D+8.0, GIMBAL_BASE_D, 2.0, App.Vector(PANEL_T+xc, PANEL_T+yc, z_base+3.0))
+    pitch = make_annulus(GIMBAL_BASE_D, GIMBAL_BASE_D-8.0, 2.0, App.Vector(PANEL_T+xc, PANEL_T+yc, z_base+5.5))
+    mx,my,mz = (20.0,15.0,12.0)
+    m1 = Part.makeBox(mx,my,mz, App.Vector(PANEL_T+xc - GIMBAL_BASE_D/2.0 - mx, PANEL_T+yc - my/2.0, z_base + 4.0))
+    m2 = Part.makeBox(mx,my,mz, App.Vector(PANEL_T+xc + GIMBAL_BASE_D/2.0,       PANEL_T+yc - my/2.0, z_base + 8.0))
+    piv1 = Part.makeCylinder(1.5, 6.0, App.Vector(PANEL_T+xc - GIMBAL_BASE_D/2.0, PANEL_T+yc, z_base + 6.0))
+    piv2 = Part.makeCylinder(1.5, 6.0, App.Vector(PANEL_T+xc + GIMBAL_BASE_D/2.0, PANEL_T+yc, z_base + 6.0))
+    objs += [add_obj(base_disc, prefix+"Base", (0.40,0.42,0.46)),
+             add_obj(yaw, prefix+"YawRing", (0.45,0.47,0.52)),
+             add_obj(pitch, prefix+"PitchRing", (0.45,0.47,0.52)),
+             add_obj(m1, prefix+"MotorYaw", (0.80,0.40,0.20)),
+             add_obj(m2, prefix+"MotorPitch", (0.80,0.40,0.20)),
+             add_obj(piv1, prefix+"PivotL", (0.94,0.92,0.86)),
+             add_obj(piv2, prefix+"PivotR", (0.94,0.92,0.86))]
+    return objs
+
+# =========================
+# 5) Shroud térmico + MLI + radiador/straps
+# =========================
+def build_shroud(prefix, xc, yc, h_need):
+    z_s = PANEL_T + BASEPLATE[2] + 2.0
+    sh = make_annulus(90.0, 89.0, min(h_need, USEFUL[2]-8.0), App.Vector(PANEL_T+xc, PANEL_T+yc, z_s))
+    add_obj(sh, prefix+"Shroud", (0.38,0.39,0.42))
+    if include_mli:
+        mli = make_annulus(88.5, 88.5-0.25, max(0.0, min(h_need-6.0, USEFUL[2]-14.0)), App.Vector(PANEL_T+xc, PANEL_T+yc, z_s+3.0))
+        add_obj(mli, prefix+"MLI", (0.90,0.90,0.75))
+    # radiador y straps
+    rad = Part.makeBox(70.0, 60.0, 2.0, App.Vector(PANEL_T + cx - 35.0, PANEL_T - 62.0, PANEL_T + 22.0))
+    add_obj(rad, "Radiator", (0.80,0.82,0.86))
+    for i, xoff in enumerate([-15.0, +15.0], 1):
+        strap = Part.makeBox(8.0, 50.0, 0.5, App.Vector(PANEL_T + cx + xoff - 4.0, PANEL_T - 50.0, PANEL_T + 35.0))
+        add_obj(strap, f"Strap_{i}", (0.75,0.45,0.25))
+
+# =========================
+# 6) Tanque (I2/Xe) y PPU redundante
+# =========================
+def build_propellant():
+    if propellant == 'I2':
+        i2 = Part.makeBox(TANK_I2["w"], TANK_I2["l"], TANK_I2["h"],
+                          App.Vector(PANEL_T + USEFUL[0] - TANK_I2["w"] - 4.0,
+                                     PANEL_T + USEFUL[1] - TANK_I2["l"] - 4.0,
+                                     PANEL_T + 6.0))
+        i2o = add_obj(i2, "TankI2", (0.60,0.50,0.40))
+        bw = TANK_I2["band_w"]
+        band_o = Part.makeBox(TANK_I2["w"], TANK_I2["l"], TANK_I2["band_t"],
+                              App.Vector(i2o.Shape.BoundBox.XMin, i2o.Shape.BoundBox.YMin, i2o.Shape.BoundBox.ZMax))
+        band_i = Part.makeBox(TANK_I2["w"]-2*bw, TANK_I2["l"]-2*bw, TANK_I2["band_t"]+0.2,
+                              App.Vector(i2o.Shape.BoundBox.XMin+bw, i2o.Shape.BoundBox.YMin+bw, i2o.Shape.BoundBox.ZMax-0.1))
+        add_obj(band_o.cut(band_i), "Heater", (0.90,0.30,0.30))
+    else:
+        t = Part.makeCylinder(TANK_XE["d"]/2.0, TANK_XE["h"], App.Vector(PANEL_T+cx, PANEL_T+6.0+TANK_XE["d"]/2.0, PANEL_T + 8.0))
+        ti = Part.makeCylinder(TANK_XE["d"]/2.0 - TANK_XE["wall"], TANK_XE["h"]-1.0, App.Vector(PANEL_T+cx, PANEL_T+6.0+TANK_XE["d"]/2.0, PANEL_T + 8.5))
+        add_obj(t.cut(ti), "TankXe", (0.75,0.75,0.80))
+        reg = Part.makeBox(30.0, 12.0, 12.0, App.Vector(PANEL_T+cx - 15.0, PANEL_T+TANK_XE["d"] + 10.0, PANEL_T + 22.0))
+        add_obj(reg, "Reg", (0.50,0.70,0.60))
+
+def build_ppu():
+    x0 = PANEL_T + USEFUL[0] - PPU_MODULE[0] - 4.0
+    yA, yB = PANEL_T + cy - PPU_MODULE[1] - 6.0, PANEL_T + cy + 6.0
+    zA = PANEL_T + USEFUL[2] - PPU_MODULE[2] - 6.0
+    p1 = Part.makeBox(*PPU_MODULE, App.Vector(x0, yA, zA))
+    p2 = Part.makeBox(*PPU_MODULE, App.Vector(x0, yB, zA))
+    add_obj(p1, "PPU_1", (0.35,0.55,0.85))
+    add_obj(p2, "PPU_2", (0.35,0.55,0.85))
+    # backplane
+    bp = Part.makeBox(80.0, 2.0, 90.0, App.Vector(PANEL_T + 8.0, PANEL_T + USEFUL[1] - 6.0, PANEL_T + 10.0))
+    add_obj(bp, "Backplane", (0.55,0.58,0.62))
+
+# =========================
+# 7) ADCS, sensores y brazo
+# =========================
+def build_adcs_sensors_arm():
+    # RW
+    rw = Part.makeCylinder(25.0/2.0, 20.0, App.Vector(PANEL_T+12.0, PANEL_T+cy - 10.0, PANEL_T + 20.0))
+    add_obj(rw, "RW", (0.55,0.55,0.58))
+    # MTQs
+    mtqx = Part.makeBox(80.0, 3.0, 8.0, App.Vector(PANEL_T + 8.0, PANEL_T+2.0, PANEL_T + 8.0))
+    mtqy = Part.makeBox(3.0, 80.0, 8.0, App.Vector(PANEL_T+2.0, PANEL_T + 8.0, PANEL_T + 8.0))
+    mtqz = Part.makeBox(80.0, 8.0, 3.0, App.Vector(PANEL_T + 8.0, PANEL_T + USEFUL[1] - 8.0 - 2.0, PANEL_T + 8.0))
+    add_obj(mtqx, "MTQ_X", (0.45,0.47,0.52))
+    add_obj(mtqy, "MTQ_Y", (0.45,0.47,0.52))
+    add_obj(mtqz, "MTQ_Z", (0.45,0.47,0.52))
+    # Sensores
+    imu = Part.makeBox(16.0, 16.0, 6.0, App.Vector(PANEL_T+4.0, PANEL_T+4.0, PANEL_T + USEFUL[2] - 10.0))
+    cam = Part.makeBox(18.0, 18.0, 10.0, App.Vector(PANEL_T+cx - 9.0, PANEL_T + USEFUL[1] - 24.0, PANEL_T + USEFUL[2] - 16.0))
+    lid = Part.makeCylinder(7.0, 15.0, App.Vector(PANEL_T+12.0, PANEL_T+cy, PANEL_T + USEFUL[2] - 21.0))
+    star = Part.makeBox(40.0, 30.0, 20.0, App.Vector(PANEL_T + USEFUL[0] - 46.0, PANEL_T + 6.0, PANEL_T + USEFUL[2] - 26.0))
+    add_obj(imu, "IMU", (0.50,0.70,0.60))
+    add_obj(cam, "Cam", (0.55,0.55,0.55))
+    add_obj(lid, "LiDAR", (0.55,0.55,0.58))
+    add_obj(star, "Star", (0.60,0.60,0.65))
+    # Brazo
+    if include_arm:
+        abx, aby, abz = (18.0, 12.0, 6.0)
+        abase = Part.makeBox(abx, aby, abz, App.Vector(PANEL_T+2.0, PANEL_T + cy - aby/2.0, PANEL_T + 8.0))
+        link = Part.makeBox(6.0, 6.0, 40.0, App.Vector(PANEL_T+2.0 + abx, PANEL_T + cy - 3.0, PANEL_T + 8.0))
+        claw = Part.makeBox(8.0, 8.0, 4.0, App.Vector(PANEL_T+2.0 + abx + 6.0, PANEL_T + cy - 4.0, PANEL_T + 48.0))
+        add_obj(abase, "ArmBase", (0.62,0.62,0.64))
+        add_obj(link, "ArmLink", (0.62,0.62,0.64))
+        add_obj(claw, "ArmTool", (0.62,0.62,0.64))
+
+# =========================
+# 8) Construcción principal
+# =========================
+if include_gimbal:
+    build_gimbal("G1_", cx, cy)
+build_thruster("T1_", cx, cy, PANEL_T)
+h_need = GIMBAL_H + 3.0 + CAV_L + 30.0
+build_shroud("S1_", cx, cy, h_need)
+if thruster_spare:
+    x2 = cx + 28.0
+    if include_gimbal: build_gimbal("G2_", x2, cy)
+    build_thruster("T2_", x2, cy, PANEL_T)
+
+build_propellant()
+build_ppu()
+build_adcs_sensors_arm()
+
+# =========================
+# 9) Recompute, masa, BBox, potencia
+# =========================
+doc.recompute()
+try:
+    Gui.activeDocument().activeView().viewAxometric()
+    Gui.SendMsgToActiveView("ViewFit")
+except: pass
+
+def all_solids():
+    return [o for o in doc.Objects if hasattr(o, "Shape")]
+
+tot_m = 0.0; by_group = {}
+for o in all_solids():
+    V = o.Shape.Volume * 1e-9
+    m = rho_for(o.Label) * V
+    tot_m += m
+    k = o.Label.split("_")[0]
+    by_group[k] = by_group.get(k, 0.0) + m
+App.Console.PrintMessage("=== Masa aproximada por grupo ===\n")
+for k in sorted(by_group.keys()):
+    App.Console.PrintMessage("{:<12s}: {:6.1f} g\n".format(k, by_group[k]*1e3))
+App.Console.PrintMessage("TOTAL (modelo): {:.1f} g\n".format(tot_m*1e3))
+
+bb = None
+for o in all_solids():
+    bb = o.Shape.BoundBox if bb is None else bb.add(o.Shape.BoundBox)
+if bb:
+    App.Console.PrintMessage("BBox ensamblaje: {:.1f}×{:.1f}×{:.1f} mm\n".format(bb.XLength, bb.YLength, bb.ZLength))
+
+def p_mode(cruise=False, pointing=False, prop=False, high=False, iodine=False):
+    p = 3.0  # OBC/comms
+    p += 2.0 if cruise else 6.0
+    p += 4.0 if pointing else 1.0
+    if prop:
+        p += 12.0 if not high else 30.0
+        if iodine: p += 5.0
+    return p
+
+App.Console.PrintMessage("--- Potencia estimada ---\n")
+App.Console.PrintMessage("Cruise: ~{:.1f} W\n".format(p_mode(cruise=True, iodine=(propellant=='I2'))))
+App.Console.PrintMessage("Apuntamiento fino: ~{:.1f} W\n".format(p_mode(pointing=True, iodine=(propellant=='I2'))))
+App.Console.PrintMessage("Propulsión baja: ~{:.1f} W\n".format(p_mode(prop=True, iodine=(propellant=='I2'))))
+App.Console.PrintMessage("Propulsión alta: ~{:.1f} W\n".format(p_mode(prop=True, high=True, iodine=(propellant=='I2'))))
+
+# =========================
+# 10) Exportación STEP/STL
+# =========================
+out_dir = App.getUserAppDataDir()
+step_path = os.path.join(out_dir, f"CubeSat_Robotico_Internal_{propellant}_{'spare' if thruster_spare else 'single'}.step")
+stl_path  = os.path.join(out_dir, f"CubeSat_Robotico_Internal_{propellant}.stl")
+try:
+    if export_step:
+        Part.export(all_solids(), step_path)
+        App.Console.PrintMessage("STEP exportado: {}\n".format(step_path))
+    if export_stl:
+        Mesh.export(all_solids(), stl_path)
+        App.Console.PrintMessage("STL exportado: {}\n".format(stl_path))
+except Exception as e:
+    App.Console.PrintError("Export error: {}\n".format(e))

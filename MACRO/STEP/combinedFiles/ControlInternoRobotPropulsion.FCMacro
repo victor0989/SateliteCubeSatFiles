@@ -1,0 +1,418 @@
+# build_cubesat_robotico.FCMacro
+# CubeSat thruster payload: geometrías y ensamblado con FreeCAD Part API
+# Unidades: mm
+
+import math
+import os
+import FreeCAD as App
+import Part
+
+# --------------------- Parámetros (editables) ---------------------
+
+CFG = {
+    "chassis": {
+        "ext": (100.0, 100.0, 113.5),
+        "panel_t": 2.0,
+        "useful": (96.0, 96.0, 109.5),
+        "rail": {"w": 8.5, "protrude": 1.5, "radius": 1.0, "length_contact": 80.0},
+        "mountgrid": {"pitch": 20.0, "hole_d": 2.6},  # M2.5 clearance
+        "edge_chamfer": 2.0,
+    },
+    "throat": {"dia": 62.0, "countersink": 0.5},  # en panel -Z, centrada
+    "baseplate": {
+        "size": (80.0, 80.0, 3.0),
+        "centre_recess": {"offset_from_corner": 40.0, "recess_dia": 56.0, "recess_depth": 1.0},
+        "o_ring": {"groove_dia": 58.0, "section": 1.5},
+        "pattern": {"count": 6, "pcd": 48.0, "clearance": 2.2},  # M2 clearance
+        "chamfer": 2.0,
+    },
+    "cavity": {
+        "dia": 45.0,
+        "length": 35.0,
+        "wall_min": 1.0,
+        "inlet": {"ext": 3.0, "int": 1.5, "z_pos": 12.0},
+        "pressure_port_dia": 4.0,
+        "ceramic_ring_t": 1.5,
+        "mount": {"count": 6, "pcd": 48.0, "clearance": 2.2},
+        "flange_t": 2.0,
+    },
+    "grid_stack": {
+        "frames_od": 55.0,
+        "active_id": 40.0,
+        "num": 3,
+        "grid_thick": 0.5,
+        "gap": 1.0,
+        "pcd": 48.0,
+    },
+    "cathode": {
+        "bore": 1.0,
+        "offset_x": 15.0,
+        "offset_from_exit": 20.0,
+        "body_d": 4.0,
+        "body_l": 18.0,
+        "bracket": (20.0, 12.0, 1.5),
+    },
+    "magnetics": {"yoke_od": 65.0, "width": 10.0, "thickness": 4.0},
+    "gimbal": {"base_d": 34.0, "motor_footprint": (20.0, 15.0, 12.0)},
+    "tank": {
+        "type": "xenon",  # "xenon" o "iodine"
+        "xenon": {"d": 50.0, "l": 70.0, "wall": 1.7},
+        "iodine": {"size": (80.0, 60.0, 25.0)},
+    },
+    "ppu": {"module_dim": (40.0, 30.0, 12.0), "modules": 2, "heatsink": (90.0, 90.0, 3.0)},
+    "control_board": {"size": (40.0, 60.0, 6.0), "shield": {"cover_t": 1.0, "standoff": 4.0}},
+    "hv": {"feedthrough": {"flange_d": 11.0}},  # M6 flange aprox
+}
+
+# Exportación (puedes activar según necesidad)
+DO_EXPORT_STEP = False
+DO_EXPORT_STL = False
+EXPORT_DIR = "out"
+
+# --------------------- Utilidades ---------------------
+
+def pcd_points(pcd, count, z=0.0, deg0=0.0):
+    pts = []
+    for i in range(count):
+        a = math.radians(deg0 + 360.0 * i / count)
+        pts.append(App.Vector((pcd/2.0)*math.cos(a), (pcd/2.0)*math.sin(a), z))
+    return pts
+
+def center_box(shape, sx, sy, sz):
+    return shape.translate(App.Vector(-sx/2.0, -sy/2.0, -sz/2.0))
+
+def safe_chamfer(shape, size):
+    try:
+        edges = shape.Edges
+        return shape.makeChamfer(size, edges)
+    except Exception:
+        return shape  # si falla, deja sin chaflán
+
+def cut_clear_holes(shape, centers, dia, normal, depth):
+    r = dia/2.0
+    tools = []
+    for c in centers:
+        tools.append(Part.makeCylinder(r, depth, c, normal))
+    if not tools:
+        return shape
+    tool = tools[0]
+    for t in tools[1:]:
+        tool = tool.fuse(t)
+    return shape.cut(tool)
+
+def ensure_doc(name="CubeSatRobotico"):
+    if App.ActiveDocument is None:
+        return App.newDocument(name)
+    return App.ActiveDocument
+
+def add_part(shape, label):
+    obj = App.ActiveDocument.addObject("Part::Feature", label)
+    obj.Shape = shape
+    return obj
+
+# --------------------- Piezas ---------------------
+
+def make_chassis():
+    extX, extY, extZ = CFG["chassis"]["ext"]
+    t = CFG["chassis"]["panel_t"]
+    cham = CFG["chassis"]["edge_chamfer"]
+    rail = CFG["chassis"]["rail"]
+    pitch = CFG["chassis"]["mountgrid"]["pitch"]
+    mg_hole = CFG["chassis"]["mountgrid"]["hole_d"]
+
+    outer = Part.makeBox(extX, extY, extZ)
+    inner = Part.makeBox(extX-2*t, extY-2*t, extZ-2*t).translate(App.Vector(t, t, t))
+    shell = outer.cut(inner)
+    shell = center_box(shell, extX, extY, extZ)
+    shell = safe_chamfer(shell, cham)
+
+    # Rails (pilares cuadrados en las esquinas)
+    rw = rail["w"]
+    protr = rail["protrude"]
+    rail_box = Part.makeBox(rw, rw, extZ)
+    rails = []
+    offs_x = extX/2.0 - rw/2.0
+    offs_y = extY/2.0 - rw/2.0
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            rb = rail_box.copy()
+            rb = rb.translate(App.Vector(sx*offs_x - rw/2.0, sy*offs_y - rw/2.0, -extZ/2.0))
+            rails.append(rb)
+    rails_f = rails[0]
+    for r in rails[1:]:
+        rails_f = rails_f.fuse(r)
+
+    # Labios de contacto en ±Z
+    lip_top = center_box(Part.makeBox(extX, extY, protr), extX, extY, protr).translate(App.Vector(0, 0, extZ/2.0 - protr/2.0))
+    lip_bot = lip_top.copy().translate(App.Vector(0, 0, -extZ + protr))
+
+    chassis = shell.fuse(rails_f).fuse(lip_top).fuse(lip_bot)
+
+    # Patrón M2.5 @ 20 mm en ±Z (taladro claro)
+    if pitch > 0:
+        pts_top = [App.Vector(x, y,  extZ/2.0) for x in (-pitch, 0.0, pitch) for y in (-pitch, 0.0, pitch)]
+        chassis = cut_clear_holes(chassis, pts_top, mg_hole, App.Vector(0, 0, -1), t+0.8)
+        pts_bot = [App.Vector(x, y, -extZ/2.0) for x in (-pitch, 0.0, pitch) for y in (-pitch, 0.0, pitch)]
+        chassis = cut_clear_holes(chassis, pts_bot, mg_hole, App.Vector(0, 0,  1), t+0.8)
+
+    # Garganta Ø62 con avellanado 0.5 en -Z centro
+    td = CFG["throat"]["dia"]
+    cs = CFG["throat"]["countersink"]
+    throat_cyl = Part.makeCylinder(td/2.0, t+0.8, App.Vector(0, 0, -extZ/2.0-0.4), App.Vector(0, 0, 1))
+    throat_cone = Part.makeCone((td/2.0)+cs, td/2.0, cs, App.Vector(0, 0, -extZ/2.0), App.Vector(0, 0, 1))
+    chassis = chassis.cut(throat_cyl.fuse(throat_cone))
+
+    return add_part(chassis, "Chassis")
+
+def make_baseplate():
+    sx, sy, sz = CFG["baseplate"]["size"]
+    bp = center_box(Part.makeBox(sx, sy, sz), sx, sy, sz)
+    bp = safe_chamfer(bp, CFG["baseplate"]["chamfer"])
+
+    # Rebaje Ø56 x 1.0 desplazado desde esquina por (EXT/2 - 40)
+    extX, extY, _ = CFG["chassis"]["ext"]
+    off = CFG["baseplate"]["centre_recess"]["offset_from_corner"]
+    cx = extX/2.0 - off
+    cy = extY/2.0 - off
+    recess_d = CFG["baseplate"]["centre_recess"]["recess_dia"]
+    recess_t = CFG["baseplate"]["centre_recess"]["recess_depth"]
+    recess_tool = Part.makeCylinder(recess_d/2.0, recess_t+0.3, App.Vector(cx, cy, sz/2.0 - recess_t), App.Vector(0, 0, 1))
+    bp = bp.cut(recess_tool)
+
+    # Canal de junta: anillo de ancho sección y profundidad sección/2
+    gD = CFG["baseplate"]["o_ring"]["groove_dia"]
+    sec = CFG["baseplate"]["o_ring"]["section"]
+    r_mid = gD/2.0
+    r_in  = r_mid - sec/2.0
+    r_out = r_mid + sec/2.0
+    groove_outer = Part.makeCylinder(r_out, sec/2.0, App.Vector(0, 0, sz/2.0 - sec/2.0), App.Vector(0, 0, 1))
+    groove_inner = Part.makeCylinder(r_in,  sec/2.0, App.Vector(0, 0, sz/2.0 - sec/2.0), App.Vector(0, 0, 1))
+    bp = bp.cut(groove_outer.cut(groove_inner))
+
+    # 6x M2 @ Ø48 PCD
+    patt = CFG["baseplate"]["pattern"]
+    centers = pcd_points(patt["pcd"], patt["count"], z=sz/2.0)
+    bp = cut_clear_holes(bp, centers, patt["clearance"], App.Vector(0, 0, -1), sz+1.0)
+
+    return add_part(bp, "Baseplate")
+
+def make_cavity():
+    d = CFG["cavity"]["dia"]
+    L = CFG["cavity"]["length"]
+    wall = CFG["cavity"]["wall_min"]
+    od = d + 2*wall
+
+    tube = Part.makeCylinder(od/2.0, L).cut(Part.makeCylinder(d/2.0, L))
+
+    # Brida superior
+    flange_t = CFG["cavity"]["flange_t"]
+    frames_od = CFG["grid_stack"]["frames_od"] + 4.0
+    flange = Part.makeCylinder(frames_od/2.0, flange_t, App.Vector(0, 0, L), App.Vector(0, 0, 1))
+    cav = tube.fuse(flange)
+
+    # Taladros 6x M2 @ Ø48 en brida
+    pcd = CFG["cavity"]["mount"]["pcd"]
+    clr = CFG["cavity"]["mount"]["clearance"]
+    centers = pcd_points(pcd, CFG["cavity"]["mount"]["count"], z=L+flange_t)
+    cav = cut_clear_holes(cav, centers, clr, App.Vector(0, 0, -1), flange_t+1.0)
+
+    # Entrada lateral Øext 3.0 en z_pos
+    inlet_ext = CFG["cavity"]["inlet"]["ext"]
+    zpos = CFG["cavity"]["inlet"]["z_pos"]
+    inlet = Part.makeCylinder(inlet_ext/2.0, od/2.0 + wall + 2.0, App.Vector(0, d/2.0 + wall, zpos), App.Vector(-1, 0, 0))
+    cav = cav.cut(inlet)
+
+    # Puerto de presión Ø4.0 ~ 3/4 de la altura
+    ppd = CFG["cavity"]["pressure_port_dia"]
+    port = Part.makeCylinder(ppd/2.0, od/2.0 + 3.0, App.Vector(0, -(d/2.0 + wall), L*0.75), App.Vector(1, 0, 0))
+    cav = cav.cut(port)
+
+    return add_part(cav, "Cavity")
+
+def make_grid_stack():
+    frames_od = CFG["grid_stack"]["frames_od"]
+    active_id = CFG["grid_stack"]["active_id"]
+    num = CFG["grid_stack"]["num"]
+    g_th = CFG["grid_stack"]["grid_thick"]
+    gap = CFG["grid_stack"]["gap"]
+    pcd = CFG["grid_stack"]["pcd"]
+
+    def grid_ring(z0):
+        disk = Part.makeCylinder(frames_od/2.0, g_th, App.Vector(0, 0, z0), App.Vector(0, 0, 1))
+        cut = Part.makeCylinder(active_id/2.0, g_th+0.2, App.Vector(0, 0, z0-0.1), App.Vector(0, 0, 1))
+        ring = disk.cut(cut)
+        centers = [v.add(App.Vector(0, 0, z0+g_th)) for v in pcd_points(pcd, 6)]
+        ring = cut_clear_holes(ring, centers, 2.2, App.Vector(0, 0, -1), g_th+0.5)
+        return ring
+
+    z = 0.0
+    stack = grid_ring(z)
+    z += g_th
+    for i in range(1, num):
+        spacer = Part.makeCylinder(frames_od/2.0, gap, App.Vector(0, 0, z), App.Vector(0, 0, 1))
+        spacer_cut = Part.makeCylinder(active_id/2.0, gap+0.2, App.Vector(0, 0, z-0.1), App.Vector(0, 0, 1))
+        stack = stack.fuse(spacer.cut(spacer_cut))
+        z += gap
+        stack = stack.fuse(grid_ring(z))
+        z += g_th
+
+    return add_part(stack, "GridStack")
+
+def make_cathode():
+    body_d = CFG["cathode"]["body_d"]
+    body_l = CFG["cathode"]["body_l"]
+    bore = CFG["cathode"]["bore"]
+    brx, bry, brz = CFG["cathode"]["bracket"]
+
+    body = Part.makeCylinder(body_d/2.0, body_l, App.Vector(0, 0, 0), App.Vector(1, 0, 0))
+    body = body.cut(Part.makeCylinder(bore/2.0, body_l+0.5, App.Vector(0, 0, 0), App.Vector(1, 0, 0)))
+
+    bracket = center_box(Part.makeBox(brx, bry, brz), brx, bry, brz)
+    bracket = bracket.translate(App.Vector(body_l/2.0, -body_d/2.0 - bry/2.0, 0.0))
+
+    # Taladros M2 claros en la escuadra
+    h1 = Part.makeCylinder(1.1, brz+1.0, App.Vector(body_l/2.0 - brx/4.0, -body_d/2.0 - bry/2.0, -brz/2.0 - 0.5), App.Vector(0, 0, 1))
+    h2 = Part.makeCylinder(1.1, brz+1.0, App.Vector(body_l/2.0 + brx/4.0, -body_d/2.0 - bry/2.0, -brz/2.0 - 0.5), App.Vector(0, 0, 1))
+    cat = body.fuse(bracket).cut(h1.fuse(h2))
+
+    # Posicionamiento relativo a la salida
+    ox = CFG["cathode"]["offset_x"]
+    oz = -CFG["cathode"]["offset_from_exit"]
+    cat = cat.translate(App.Vector(ox, 0, oz))
+
+    return add_part(cat, "Cathode")
+
+def make_magnetic_yoke():
+    od = CFG["magnetics"]["yoke_od"]
+    w = CFG["magnetics"]["width"]
+    t = CFG["magnetics"]["thickness"]
+    ring = Part.makeCylinder(od/2.0, t).cut(Part.makeCylinder((od/2.0 - w), t))
+    ring = ring.translate(App.Vector(0, 0, -t/2.0))  # centrar en Z
+    return add_part(ring, "MagYoke")
+
+def make_gimbal():
+    base_d = CFG["gimbal"]["base_d"]
+    mx, my, mz = CFG["gimbal"]["motor_footprint"]
+    ring_w = 3.0
+
+    inner = Part.makeCylinder(base_d/2.0, ring_w)
+    outer = Part.makeCylinder(base_d/2.0 + 6.0, ring_w)
+    outer = outer.cut(Part.makeCylinder(base_d/2.0 + 6.0 - ring_w, ring_w+0.2)).translate(App.Vector(0, 0, ring_w + 1.0))
+    g = inner.fuse(outer)
+
+    mA = center_box(Part.makeBox(mx, my, mz), mx, my, mz).translate(App.Vector(base_d/2.0 + 10.0, 0, mz/2.0))
+    mB = center_box(Part.makeBox(mx, my, mz), mx, my, mz).translate(App.Vector(0, base_d/2.0 + 10.0, mz/2.0))
+    g = g.fuse(mA).fuse(mB)
+    return add_part(g, "Gimbal")
+
+def make_tank():
+    if CFG["tank"]["type"].lower() == "xenon":
+        d = CFG["tank"]["xenon"]["d"]
+        L = CFG["tank"]["xenon"]["l"]
+        tank = Part.makeCylinder(d/2.0, L).fuse(Part.makeSphere(d/2.0).translate(App.Vector(0, 0, L)))
+    else:
+        sx, sy, sz = CFG["tank"]["iodine"]["size"]
+        tank = center_box(Part.makeBox(sx, sy, sz), sx, sy, sz)
+    return add_part(tank, "Tank")
+
+def make_ppu():
+    mx, my, mz = CFG["ppu"]["module_dim"]
+    modules = CFG["ppu"]["modules"]
+    hsx, hsy, hsz = CFG["ppu"]["heatsink"]
+    hs = center_box(Part.makeBox(hsx, hsy, hsz), hsx, hsy, hsz)
+    pack = hs
+    for i in range(modules):
+        mod = center_box(Part.makeBox(mx, my, mz), mx, my, mz)
+        mod = mod.translate(App.Vector(-hsx/2.0 + mx/2.0 + i*(mx+5.0), 0, hsz/2.0 + mz/2.0))
+        pack = pack.fuse(mod)
+    return add_part(pack, "PPU")
+
+def make_control_board():
+    sx, sy, sz = CFG["control_board"]["size"]
+    cover_t = CFG["control_board"]["shield"]["cover_t"]
+    standoff = CFG["control_board"]["shield"]["standoff"]
+    pcb = center_box(Part.makeBox(sx, sy, sz), sx, sy, sz)
+    cover = center_box(Part.makeBox(sx-2.0, sy-2.0, cover_t), sx-2.0, sy-2.0, cover_t)
+    cover = cover.translate(App.Vector(0, 0, sz/2.0 + standoff + cover_t/2.0))
+    board = pcb.fuse(cover)
+    return add_part(board, "ControlZynq")
+
+def make_hv_feedthrough():
+    fd = CFG["hv"]["feedthrough"]["flange_d"]
+    flange_t = 3.0
+    stud = Part.makeCylinder(fd/2.0, flange_t)
+    stud = stud.translate(App.Vector(0, 0, -flange_t/2.0))
+    return add_part(stud, "HVFeedthrough")
+
+# --------------------- Ensamblado y exportación ---------------------
+
+def assemble_all():
+    doc = ensure_doc()
+    extX, extY, extZ = CFG["chassis"]["ext"]
+    t = CFG["chassis"]["panel_t"]
+
+    ch = make_chassis()
+
+    bp = make_baseplate()
+    bp.Placement.Base = App.Vector(0, 0, -extZ/2.0 + t + 1.5)
+
+    cv = make_cavity()
+    cv.Placement.Base = App.Vector(0, 0, -extZ/2.0 + t + 1.5 + 3.0)
+
+    gs = make_grid_stack()
+    gs.Placement.Base = App.Vector(0, 0, -extZ/2.0 + t + 1.5 + 3.0 + CFG["cavity"]["length"])
+
+    ct = make_cathode()
+    ct.Placement.Base = App.Vector(0, 0, 0)
+
+    yk = make_magnetic_yoke()
+    yk.Placement.Base = App.Vector(0, 0, -extZ/2.0 + 20.0)
+
+    gb = make_gimbal()
+    gb.Placement.Base = App.Vector(0, 0, -extZ/2.0 + 10.0)
+
+    tk = make_tank()
+    tk.Placement.Base = App.Vector(-extX/4.0, 0, -extZ/2.0 + 15.0)
+
+    pu = make_ppu()
+    pu.Placement.Base = App.Vector(0, extY/4.0 - 10.0, 0)
+
+    cz = make_control_board()
+    cz.Placement.Base = App.Vector(extX/4.0 - 10.0, -extY/4.0 + 10.0, 0)
+
+    hv = make_hv_feedthrough()
+    hv.Placement.Base = App.Vector(extX/2.0 - 8.0, 0, -extZ/2.0 + t/2.0)
+
+    App.ActiveDocument.recompute()
+
+    # Compound para exportación del conjunto
+    comp_shape = Part.makeCompound([o.Shape for o in (ch, bp, cv, gs, ct, yk, gb, tk, pu, cz, hv)])
+    comp = add_part(comp_shape, "AssemblyCompound")
+    App.ActiveDocument.recompute()
+
+    return {"compound": comp, "parts": [ch, bp, cv, gs, ct, yk, gb, tk, pu, cz, hv]}
+
+def export_all(bundle):
+    if not (DO_EXPORT_STEP or DO_EXPORT_STL):
+        return
+    if not os.path.isdir(EXPORT_DIR):
+        os.makedirs(EXPORT_DIR)
+    parts = bundle["parts"]
+    comp = bundle["compound"]
+    if DO_EXPORT_STEP:
+        # STEP por pieza y el conjunto
+        for o in parts:
+            Part.export([o], os.path.join(EXPORT_DIR, f"{o.Name}.step"))
+        Part.export([comp], os.path.join(EXPORT_DIR, "assembly.step"))
+    if DO_EXPORT_STL:
+        import Mesh
+        for o in parts:
+            Mesh.export([o], os.path.join(EXPORT_DIR, f"{o.Name}.stl"))
+        Mesh.export([comp], os.path.join(EXPORT_DIR, "assembly.stl"))
+
+# --------------------- Main ---------------------
+
+if __name__ == "__main__":
+    bundle = assemble_all()
+    export_all(bundle)
+    print("Modelo generado en el documento activo. Exportación desactivada (actívela con DO_EXPORT_*).")
